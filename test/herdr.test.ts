@@ -65,5 +65,21 @@ test('branch switch during lookup never publishes an obsolete result', async () 
   const result = await refresh(defaults, false, run);
   expect(result[0]?.status).toBe('skipped');
   expect(result[0]?.reason).toContain('Branch changed');
+  expect(result[0]?.stale).toBe(true);
   expect(published).toBe(false);
+});
+
+test('targeted refresh avoids all-workspace listing and publishes only its subset', async () => {
+  const published: string[] = [];
+  const run: Runner = async (args, cwd) => {
+    if (args[1] === 'rev-parse') return cwd!;
+    if (args[1] === 'remote') return 'origin';
+    if (args[1] === 'branch') return ''; // detached: no GitHub lookup
+    if (args[2] === 'report-metadata') { published.push(args[3]!); return ''; }
+    throw new Error(`Unexpected ${args.join(' ')}`);
+  };
+  const target = { ...workspace, worktree: { checkout_path: '/repo' } };
+  expect((await refresh(defaults, false, run, [target])).map(r => r.status)).toEqual(['published']);
+  expect(published).toEqual(['w1']);
+  expect(await refresh(defaults, false, run, [])).toEqual([]);
 });

@@ -57,19 +57,19 @@ Action acceptance only means the process started. Check the completed log and si
 
 ## Polling
 
-The polling interval is `pollSeconds` in the plugin config: **60 seconds by default**, an integer from **15 to 3600**. The worker refreshes immediately on startup, then waits the configured interval after each cycle completes. Refresh duration adds to that interval; cycles never overlap. There is no instantaneous branch-change subscription.
+Background workspaces use `pollSeconds` (**60 seconds** by default); the active workspace uses `activePollSeconds` (**30 seconds** by default). Both are integers from **15 to 3600**, measured after each workspace refresh completes. Refreshes never overlap. Local branch checks run every 2 seconds for the active workspace and on both sides of a focus change; unchanged branches do not trigger extra GitHub requests.
 
 Polling uses a one-shot Herdr startup hook to launch a session-scoped worker. Linking or enabling a plugin does not run startup hooks, so an already-running Herdr session needs the start action once. Future Herdr starts run the hook automatically. Manual refresh remains available.
 
 - `start`: idempotently start the worker and refresh immediately.
-- `status`: report running/waiting state, completed cycles, last success/error and next scheduled cycle. Read the action log to see the result.
+- `status`: report running/waiting state, refresh count (`cycles`), and last success/error. Read the action log to see the result.
 - `stop`: request shutdown; a bounded in-flight subprocess may finish, but no new metadata reports are started after stop is observed. Existing badges are left in place. Stopping is session-local; a future server startup starts polling again. Disable the plugin to prevent startup.
 
 The worker watches the Herdr socket and checks plugin enablement periodically (about every five seconds) and before publishing. Disabling/unlinking the plugin or ending its Herdr session stops the worker. A later enable/relink requires the start action again. No Herdr server restart is needed.
 
-Use Herdr actions for refresh/start/stop/status: they supply the config/state/socket environment. Plain `bun src/main.ts preview` remains available inside Herdr for read-only diagnostics. Each session uses separate state under `HERDR_PLUGIN_STATE_DIR`, with bounded status/error data and a token-authenticated localhost control endpoint. Kernel file locks via Bun FFI prevent duplicate workers and serialize manual/polling refreshes, and release automatically on crashes. Locks require macOS or Linux libc and Bun FFI support. A manual refresh waits up to 30 seconds for an active cycle, then fails with a busy diagnostic rather than overlapping. Crashed workers do not auto-respawn; use start or the next Herdr startup.
+Use Herdr actions for refresh/start/stop/status: they supply the config/state/socket environment. Plain `bun src/main.ts preview` remains available inside Herdr for read-only diagnostics. Each session uses separate state under `HERDR_PLUGIN_STATE_DIR`, with bounded status/error data and a token-authenticated localhost control endpoint. Kernel file locks via Bun FFI prevent duplicate workers and serialize manual/polling refreshes, and release automatically on crashes. Locks require macOS or Linux libc and Bun FFI support. A manual refresh waits up to 30 seconds for an active refresh, then fails with a busy diagnostic rather than overlapping. Crashed workers do not auto-respawn; use start or the next Herdr startup.
 
-GitHub/authentication failures are retried on a later cycle without clearing prior metadata. Config changes are picked up on the next cycle. Per-workspace errors do not prevent other workspaces from updating. Polling makes read-only GitHub requests for each eligible workspace; a longer interval reduces API usage.
+GitHub/authentication failures are retried after the workspace’s polling interval without clearing prior metadata. Config changes are picked up during local observation (normally every 2 seconds). Per-workspace errors do not prevent other workspaces from updating. Polling makes read-only GitHub requests for each eligible workspace; a longer interval reduces API usage.
 
 ## Formatting
 
@@ -79,13 +79,14 @@ Edit `config.json` under the directory printed by:
 herdr plugin config-dir alx-xo.pr-status
 ```
 
-Actions use `HERDR_PLUGIN_CONFIG_DIR`; manual CLI runs ask Herdr for it. No file means defaults. The file is reread every invocation and polling cycle. Partial settings are merged with defaults; invalid types, unknown keys and multiline labels fail before any publishing.
+Actions use `HERDR_PLUGIN_CONFIG_DIR`; manual CLI runs ask Herdr for it. No file means defaults. The file is reread every invocation and local observation. Partial settings are merged with defaults; invalid types, unknown keys and multiline labels fail before any publishing.
 
 Example (all settings optional):
 
 ```json
 {
   "pollSeconds": 60,
+  "activePollSeconds": 30,
   "hideZeroThreads": true,
   "visible": {
     "pr": true,
@@ -129,7 +130,7 @@ The built-in Octicons are: PR open `U+F407`, draft `U+F4DD`, merged `U+F419`, cl
 
 Unknown checks/review and thread counts remain plain text. Glyph identifiers verified against [Nerd Fonts v3.4.0](https://github.com/ryanoasis/nerd-fonts/blob/v3.4.0/glyphnames.json).
 
-Herdr sidebar rows and color rules live in Herdr's config. See the [Herdr 0.9 sidebar example](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and polling cycles.
+Herdr sidebar rows and color rules live in Herdr's config. See the [Herdr 0.9 sidebar example](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and local observation.
 
 ## Scope and limitations
 
@@ -137,7 +138,7 @@ Herdr sidebar rows and color rules live in Herdr's config. See the [Herdr 0.9 si
 - Git branch/push-remote identity is used to verify the PR head; detached HEAD has no branch PR. For forks, this plugin searches both the fork and its parent and rejects ambiguous open matches. It prefers an open PR, otherwise the most recently updated matching terminal PR. Lists hitting the 100-result limit fail explicitly. GitHub lookup errors do not become no-PR results.
 - Missing Git push refs are resolved using `push.default`; unresolved refspecs and ambiguous push destinations fail rather than guessing a PR head.
 - Check counts use `gh pr checks --json state`, which paginates contexts and selects current runs rather than counting superseded attempts. Successful reruns replace older failures/cancellations; a current cancellation still counts as failed. Raw `pr list` rollups are used only to distinguish missing/empty check data, not for totals.
-- Status is a snapshot: GitHub/branch changes appear on the next successful polling cycle or manual refresh. A branch switch during a lookup discards that result instead of publishing it for the wrong branch. Network/authentication failures retain potentially stale metadata until a successful retry.
+- Status is a snapshot: GitHub/branch changes appear on the next successful workspace refresh. A branch switch during a lookup discards that result instead of publishing it for the wrong branch. Network/authentication failures retain potentially stale metadata until a successful retry.
 - No notifications, board, review pane, GitHub mutation, release pipeline, standalone binary, Node compatibility work, or marketplace publication.
 - Keep settings and polling control state outside the linked source checkout, in Herdr's supplied config/state directories.
 

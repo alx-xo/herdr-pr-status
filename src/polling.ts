@@ -4,10 +4,14 @@ import { isAbsolute, join } from 'node:path';
 import { createConnection, createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { defaults, parseConfig, type Config } from './format';
-import { herdrBin } from './herdr';
+import { herdrBin, listWorkspaces } from './herdr';
 import { runCommand, type Runner } from './process';
-import { refresh } from './refresh';
+import { refresh, StaleCheckoutError } from './refresh';
 import { serialized, tryLock } from './locking';
+
+import { Scheduler } from './scheduler';
+import { localIdentity, workspaceLoop } from './workspace-loop';
+import { subscribe } from './subscription';
 
 const id = 'alx-xo.pr-status';
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 1000);
@@ -166,6 +170,8 @@ export async function worker(s: Session): Promise<void> {
   if (!release) return;
   let active = true;
   let wake = () => {};
+  let signaled = false;
+  const scheduler = new Scheduler();
   const state: CycleState = { running: true, state: 'starting', cycles: 0, startedAt: new Date().toISOString() };
   const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(state), { mode: 0o600 }); };
   const stop = () => { active = false; state.state = 'stopping'; wake(); };
@@ -195,10 +201,14 @@ export async function worker(s: Session): Promise<void> {
     try { if (!await enabled()) stop(); }
     catch (error) { state.lastError = message(error); state.lastErrorAt = new Date().toISOString(); }
   };
-  const guarded: Runner = async (args, cwd) => {
+  const checkCommand = async (args: string[]) => {
     if (!active || !await sameSession(s)) throw new Error('Poller stopped or Herdr session ended');
     if (args.includes('report-metadata') && !await enabled()) { stop(); throw new Error('Plugin disabled/unlinked'); }
     if (!active || !await sameSession(s)) throw new Error('Poller stopped');
+  };
+  const guarded: Runner = async (args, cwd) => {
+    await checkCommand(args);
+    if (!active) throw new Error('Poller stopped');
     return runCommand(args, cwd);
   };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
@@ -210,55 +220,69 @@ export async function worker(s: Session): Promise<void> {
     await writeFile(s.control, JSON.stringify({ port: address.port, token }), { mode: 0o600 });
     connection = createConnection(s.socket);
     connection.on('error', stop); connection.on('close', stop);
-    // An idle socket is not a session monitor: Herdr closes connections that
-    // never send a request. Subscribe and verify its acknowledgement first.
-    await new Promise<void>((resolve, reject) => {
-      const stream = connection!;
-      let response = '';
-      const timeout = setTimeout(() => reject(new Error('Herdr subscription handshake timed out')), 5000);
-      const failed = (error?: Error) => { clearTimeout(timeout); reject(error ?? new Error('Herdr subscription closed before acknowledgement')); };
-      stream.once('error', failed); stream.once('close', failed);
-      stream.once('connect', () => stream.write(JSON.stringify({
-        id: 'pr-status-lifetime', method: 'events.subscribe',
-        params: { subscriptions: [{ type: 'workspace.closed' }] },
-      }) + '\n'));
-      const onData = (data: Buffer) => {
-        response += data.toString();
-        if (response.length > 8192) { failed(new Error('Invalid Herdr subscription response')); return; }
-        const end = response.indexOf('\n');
-        if (end < 0) return;
-        clearTimeout(timeout); stream.off('data', onData);
-        stream.off('error', failed); stream.off('close', failed);
-        try {
-          const ack = JSON.parse(response.slice(0, end));
-          if (ack.id !== 'pr-status-lifetime' || ack.result?.type !== 'subscription_started') throw new Error('Herdr subscription rejected');
-          resolve();
-        } catch (error) { reject(error); }
-      };
-      stream.on('data', onData);
+    await subscribe(connection, value => {
+      if (!active || !value || typeof value !== 'object') return;
+      const data = (value as { data?: { type?: string; workspace_id?: string } }).data;
+      if (data?.type === 'workspace_focused' && typeof data.workspace_id === 'string') {
+        scheduler.focus(data.workspace_id);
+        signaled = true; wake();
+      }
+    }, error => {
+      state.lastError = message(error); state.lastErrorAt = new Date().toISOString(); stop();
     });
-    connection.resume(); // Subscription events are drained; refresh remains interval-based.
     await check();
     timer = setInterval(() => {
       if (watching || !active) return;
       watching = true;
       void check().finally(() => { watching = false; });
     }, 1000);
-    await pollLoop({
-      load: loadConfig, active: () => active, save,
+    await workspaceLoop({
+      scheduler, load: loadConfig, active: () => active,
+      list: () => listWorkspaces(guarded),
+      local: workspace => localIdentity(workspace, guarded),
+      error: error => { state.lastError = message(error); state.lastErrorAt = new Date().toISOString(); },
+      settled: async initial => {
+        if (!initial || scheduler.entries.size === 0) state.cycles++;
+        state.state = active ? 'waiting' : 'stopping';
+        await save();
+      },
       sleep: ms => new Promise(resolve => {
         const timeout = setTimeout(resolve, ms);
         wake = () => { clearTimeout(timeout); resolve(); };
-        if (!active) wake();
+        if (!active || signaled) { signaled = false; wake(); }
       }),
-      cycle: config => serialized(join(s.dir, 'refresh.lock'), async () => {
+      refresh: (config, workspace) => serialized(join(s.dir, 'refresh.lock'), async () => {
         if (!active || !await sameSession(s)) throw new Error('Poller stopped');
         if (!await enabled()) { stop(); throw new Error('Plugin disabled/unlinked'); }
-        const results = await refresh(config, false, guarded);
+        const entry = scheduler.entries.get(workspace.workspace_id);
+        if (!entry) return;
+        const before = await localIdentity(entry.workspace, guarded);
+        if (!scheduler.consume(workspace.workspace_id, before)) return;
+        const version = entry.version;
+        state.state = 'refreshing'; delete state.nextRunAt;
+        const publishGuard: Runner = async (args, cwd) => {
+          if (!args.includes('report-metadata')) return guarded(args, cwd);
+          await checkCommand(args);
+          // Validate after enablement/session waits, with no further await before spawn.
+          const current = await localIdentity(entry.workspace, guarded);
+          scheduler.observe(workspace.workspace_id, current);
+          if (!active) throw new Error('Poller stopped');
+          if (scheduler.entries.get(workspace.workspace_id) !== entry || entry.version !== version || current !== before) throw new StaleCheckoutError('Checkout changed during lookup; retry on next refresh');
+          return runCommand(args, cwd);
+        };
+        const results = await refresh(config, false, publishGuard, [entry.workspace]);
+        if (results.some(result => result.stale)) {
+          // An unfocused checkout has no periodic local observer. Requeue even
+          // if it switched away and back before this final identity read.
+          scheduler.requeue(workspace.workspace_id);
+          const current = scheduler.entries.get(workspace.workspace_id);
+          if (current) scheduler.observe(workspace.workspace_id, await localIdentity(current.workspace, guarded));
+        }
         const errors = results.filter(result => result.status === 'error');
         if (errors.length) throw new Error(errors.map(result => result.reason).join('; '));
+        state.lastSuccessAt = new Date().toISOString(); delete state.lastError;
       }),
-    }, state);
+    });
   } catch (error) {
     state.lastError = message(error); state.lastErrorAt = new Date().toISOString();
     throw error;

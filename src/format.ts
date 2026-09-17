@@ -4,6 +4,7 @@ export const tokenNames = ['pr', 'pr_checks', 'pr_review', 'pr_threads'] as cons
 export type Tokens = Record<(typeof tokenNames)[number], string>;
 export const defaults = {
   pollSeconds: 60,
+  activePollSeconds: 30,
   visible: { pr: true, pr_checks: true, pr_review: true, pr_threads: true },
   hideZeroThreads: true,
   labels: {
@@ -30,9 +31,9 @@ export function parseConfig(value: unknown): Config {
   const raw = record(value, 'config');
   const result = structuredClone(defaults);
   for (const [key, val] of Object.entries(raw)) {
-    if (key === 'pollSeconds') {
-      if (typeof val !== 'number' || !Number.isInteger(val) || val < 15 || val > 3600) throw new Error('pollSeconds must be an integer from 15 to 3600');
-      result.pollSeconds = val;
+    if (key === 'pollSeconds' || key === 'activePollSeconds') {
+      if (typeof val !== 'number' || !Number.isInteger(val) || val < 15 || val > 3600) throw new Error(`${key} must be an integer from 15 to 3600`);
+      result[key] = val;
     } else if (key === 'hideZeroThreads') {
       if (typeof val !== 'boolean') throw new Error('hideZeroThreads must be boolean');
       result.hideZeroThreads = val;

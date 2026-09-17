@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, type Socket } from 'node:net';
@@ -124,7 +124,9 @@ test('detached duplicate start, immediate refresh, explicit stop and safe stale 
     expect(starts[0].startedAt).toBe(starts[1].startedAt);
     await f.until(async () => (await f.cli('status')).cycles === 1);
     expect((await readFile(join(f.dir, 'calls'), 'utf8')).trim()).toBe('refresh');
-    expect(f.subscriptions).toEqual([{ subscriptions: [{ type: 'workspace.closed' }] }]);
+    expect(f.subscriptions).toHaveLength(1);
+    expect(new Set((f.subscriptions[0] as { subscriptions: { type: string }[] }).subscriptions.map(s => s.type)))
+      .toEqual(new Set(['workspace.closed', 'workspace.focused']));
     await f.cli('refresh');
     expect((await readFile(join(f.dir, 'calls'), 'utf8')).trim().split('\n')).toHaveLength(2);
     expect((await f.cli('stop')).state).toBe('stopping');
@@ -212,3 +214,159 @@ test('rejected subscription fails start without refreshing and retains diagnosti
     await expect(readFile(join(f.dir, 'calls'), 'utf8')).rejects.toThrow();
   } finally { await f.cleanup(); }
 }, 10000);
+
+/** Real worker, socket and lock; every Git/gh/Herdr command stays in this fixture. */
+async function checkoutFixture(scenario: 'during' | 'publication' | 'lock') {
+  const f = await fixture();
+  try {
+    const repo = join(f.dir, 'repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await writeFile(join(f.dir, 'branch'), 'old');
+    await writeFile(join(f.dir, 'config.json'), JSON.stringify({ pollSeconds: 60, activePollSeconds: 30 }));
+    const script = `#!${process.execPath}
+import {readFileSync,appendFileSync,existsSync,writeFileSync} from 'node:fs';
+import {basename} from 'node:path';
+const dir=process.env.HERDR_PLUGIN_STATE_DIR, repo=dir+'/repo';
+const args=process.argv.slice(2), tool=basename(process.argv[1]);
+const log=(kind,value)=>appendFileSync(dir+'/events',JSON.stringify({kind,value})+'\\n');
+const branch=()=>readFileSync(dir+'/branch','utf8');
+const json=value=>console.log(JSON.stringify(value));
+const gate=async name=>{log('gate',name);while(!existsSync(dir+'/'+name)) await Bun.sleep(10);};
+if(tool==='herdr') {
+  if(args[0]==='plugin') {
+    if(${JSON.stringify(scenario)}==='publication' && existsSync(dir+'/lookup-complete')) await gate('release-publication');
+    json({result:{plugins:[{plugin_id:'alx-xo.pr-status',enabled:true}]}});
+  }
+  else if(args[0]==='workspace' && args[1]==='list') {
+    if(existsSync(dir+'/observed-new')) log('observed','new');
+    json({result:{workspaces:[{workspace_id:'w1',label:'repo',focused:false,worktree:{checkout_path:repo}}]}});
+  } else if(args[1]==='report-metadata') {
+    const tokens={};
+    for(let i=0;i<args.length;i++) {
+      if(args[i]==='--token') {const [name,...value]=args[++i].split('=');tokens[name]=value.join('=');}
+      else if(args[i]==='--clear-token') tokens[args[++i]]='';
+    }
+    log('published',{workspace:args[2],tokens});json({result:{}});
+  }
+  else throw Error('Unexpected Herdr '+args);
+} else if(tool==='git') {
+  if(args[0]==='rev-parse') console.log(args[1]==='--absolute-git-dir'?repo+'/.git':repo);
+  else if(args[0]==='remote') console.log(args[1]==='get-url'?'https://github.com/test/repo':'origin');
+  else if(args[0]==='for-each-ref') console.log('');
+  else if(args[0]==='branch') {
+    const value=branch();
+    if(${JSON.stringify(scenario)}==='lock' && value==='queued') await gate('release-observation');
+    if(${JSON.stringify(scenario)}==='lock' && value==='latest') await gate('release-latest-observation');
+    if(${JSON.stringify(scenario)}==='publication' && value==='new') writeFileSync(dir+'/observed-new','');
+    console.log(value);
+  } else throw Error('Unexpected Git '+args);
+} else if(tool==='gh') {
+  if(args[0]==='repo') json({nameWithOwner:'test/repo',url:'https://github.com/test/repo',parent:null});
+  else if(args[0]==='pr' && args[1]==='list') {
+    const head=args[args.indexOf('--head')+1];log('lookup',head);
+    if(${JSON.stringify(scenario)}!=='lock' && head==='old') await gate('release-lookup');
+    const number={old:101,new:202,latest:303}[head];
+    if(!number) throw Error('Unexpected head '+head);
+    json([{number,url:'https://github.com/test/repo/pull/'+number,state:'OPEN',isDraft:false,
+      headRefName:head,headRepository:{name:'repo'},headRepositoryOwner:{login:'test'},statusCheckRollup:[]}]);
+  } else if(args[0]==='api') {
+    if(args.includes('number=101')) writeFileSync(dir+'/lookup-complete','');
+    json({data:{repository:{pullRequest:{reviewThreads:{nodes:[],pageInfo:{hasNextPage:false}}}}}});
+  }
+  else throw Error('Unexpected gh '+args);
+} else throw Error('Unexpected executable');
+`;
+    for (const tool of ['herdr', 'git', 'gh']) await writeFile(join(f.dir, tool), script, { mode: 0o700 });
+    Object.assign(f.env, { PATH: `${f.dir}:${process.env.PATH}` });
+    const events = async <T = string>(kind: string) => {
+      try {
+        const lines = (await readFile(join(f.dir, 'events'), 'utf8')).trim().split('\n');
+        return lines.map(line => JSON.parse(line) as { kind: string; value: T })
+          .filter(event => event.kind === kind).map(event => event.value);
+      } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    };
+    return { ...f, events, published: () => events<Publication>('published'),
+      release: (name: string) => writeFile(join(f.dir, name), '') };
+  } catch (error) { await f.cleanup(); throw error; }
+}
+
+interface Publication { workspace: string; tokens: Record<string, string> }
+const publication = (number: number): Publication => ({ workspace: 'w1', tokens: {
+  pr: `${defaults.icons.open} #${number}`, pr_checks: 'no checks', pr_review: 'review ?', pr_threads: '',
+} });
+
+test('worker retries changed checkouts without publishing obsolete metadata', async () => {
+  for (const phase of ['during', 'publication'] as const) {
+    const f = await checkoutFixture(phase);
+    try {
+      await f.cli('start');
+      await f.until(async () => (await f.events('gate')).includes('release-lookup'));
+      expect(await f.published()).toEqual([]);
+      if (phase === 'publication') {
+        // Let the old payload reach publication's async enablement check first.
+        await f.release('release-lookup');
+        await f.until(async () => (await f.events('gate')).includes('release-publication'));
+      }
+      await writeFile(join(f.dir, 'branch'), 'new');
+      if (phase === 'publication') {
+        for (const client of f.connections) client.write(JSON.stringify({
+          event: 'workspace_focused', data: { type: 'workspace_focused', workspace_id: 'w1' },
+        }) + '\n');
+        // A subsequent workspace-list proves the observer finished its new-branch pass.
+        await f.until(async () => (await f.events('observed')).includes('new'));
+        expect(await f.published()).toEqual([]);
+        await f.release('release-publication');
+      } else {
+        // Preserve coverage for unfocused checkouts with no periodic local observer.
+        await f.release('release-lookup');
+      }
+      // Completion is the worker's persisted cycle boundary, not command counts.
+      await f.until(async () => (await f.cli('status')).cycles >= 2);
+      await f.cli('stop');
+      await f.until(async () => !(await f.cli('status')).running);
+      expect(await f.events('lookup')).toEqual(['old', 'new']);
+      // Compare the actual workspace and every token; ambient branch state proves nothing.
+      expect(await f.published()).toEqual([publication(202)]);
+      expect(await f.published()).not.toContainEqual(publication(101));
+    } finally {
+      await f.release('release-lookup'); await f.release('release-publication'); await f.cleanup();
+    }
+  }
+}, 25000);
+
+// Scheduler.consume's deterministic test proves no queued duplicate remains. This
+// integration retains the real worker -> lock -> preflight -> consume -> publish wiring.
+test('worker consumes the latest checkout after a gated observation and manual lock', async () => {
+  const f = await checkoutFixture('lock');
+  let release: (() => void) | undefined;
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles === 1);
+    const sessionDir = (await readdir(f.dir)).find(name => name.startsWith('session-'))!;
+    release = tryLock(join(f.dir, sessionDir, 'refresh.lock'));
+    expect(release).toBeDefined();
+    await writeFile(join(f.dir, 'branch'), 'queued');
+    for (const client of f.connections) client.write(JSON.stringify({
+      event: 'workspace_focused', data: { type: 'workspace_focused', workspace_id: 'w1' },
+    }) + '\n');
+    await f.until(async () => (await f.events('gate')).includes('release-observation'));
+    expect(await f.events('lookup')).toEqual(['old']);
+    await writeFile(join(f.dir, 'branch'), 'latest');
+    // The observer returns its captured 'queued' identity; preflight must consume
+    // 'latest' after the lease is released, rather than publish or retry 'queued'.
+    await f.release('release-observation');
+    // The next local pass sees latest while the remote lane is still lease-blocked.
+    await f.until(async () => (await f.events('gate')).includes('release-latest-observation'));
+    expect(await f.events('lookup')).toEqual(['old']);
+    await f.release('release-latest-observation');
+    release!(); release = undefined;
+    await f.until(async () => (await f.cli('status')).cycles >= 2);
+    await f.cli('stop');
+    await f.until(async () => !(await f.cli('status')).running);
+    expect(await f.events('lookup')).toEqual(['old', 'latest']);
+    expect(await f.published()).toEqual([publication(101), publication(303)]);
+  } finally {
+    release?.(); await f.release('release-observation'); await f.release('release-latest-observation');
+    await f.cleanup();
+  }
+}, 20000);

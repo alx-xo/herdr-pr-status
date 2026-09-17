@@ -1,7 +1,7 @@
 import { runCommand, type Runner } from './process';
 import { tokenNames, type Tokens } from './format';
 
-export interface Workspace { workspace_id: string; label: string; worktree?: { checkout_path: string } }
+export interface Workspace { workspace_id: string; label: string; focused?: boolean; worktree?: { checkout_path: string } }
 export interface Checkout { cwd?: string; skipped?: string }
 export const herdrBin = () => process.env.HERDR_BIN_PATH || 'herdr';
 
