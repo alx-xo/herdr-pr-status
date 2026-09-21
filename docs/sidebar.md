@@ -1,4 +1,8 @@
-# Herdr 0.9 sidebar
+# Optional sidebar colors
+
+These optional Catppuccin Mocha colors match the configuration used in the README
+screenshot. They are Herdr settings, not plugin defaults or plugin `config.json`
+settings. You can use the plugin without these color overrides.
 
 Merge these rows into `ui.sidebar.spaces` in your Herdr `config.toml`.
 **Do not replace your full configuration.** If `[ui.sidebar.spaces]` already exists,
@@ -19,19 +23,29 @@ rows = [
   ["state_icon", "workspace"],
   ["branch", "git_status"],
   [
-    { token = "$pr", fg = "#f2cdcd", rules = [{ starts_with = "\uF407", fg = "#a6e3a1" }, { starts_with = "\uF4DD", fg = "#9399b2" }, { starts_with = "\uF419", fg = "#cba6f7" }, { starts_with = "\uF4DC", fg = "#f38ba8" }] },
-    { token = "$pr_checks", fg = "#f9e2af", rules = [{ starts_with = "\uF42E", fg = "#a6e3a1" }, { starts_with = "\uF467", fg = "#f38ba8" }, { equals = "checks ?", fg = "#6c7086" }, { equals = "no checks", fg = "#6c7086" }] },
-    { token = "$pr_review", fg = "#f9e2af", rules = [{ starts_with = "\uF49E", fg = "#a6e3a1" }, { starts_with = "\uF440", fg = "#f38ba8" }, { equals = "review ?", fg = "#6c7086" }] },
+    { token = "$pr", fg = "#f2cdcd" },
+    { token = "$pr_checks", fg = "#f9e2af", rules = [
+      { starts_with = "\uF42E", fg = "#a6e3a1" },
+      { starts_with = "\uF467", fg = "#f38ba8" },
+    ] },
+    { token = "$pr_review", fg = "#f9e2af", rules = [
+      { starts_with = "\uF49E", fg = "#a6e3a1" },
+      { starts_with = "\uF440", fg = "#f38ba8" },
+      { equals = "review ?", fg = "#6c7086" },
+    ] },
   ],
   [
-    { token = "$pr_threads", fg = "#74c7ec", rules = [{ equals = "0 threads", fg = "#6c7086" }, { equals = "? threads", fg = "#6c7086" }] },
+    { token = "$pr_threads", fg = "#74c7ec", rules = [
+      { equals = "0 threads", fg = "#6c7086" },
+    ] },
   ],
 ]
 ```
 
-Open/passing/approved are green; closed/failed/changes requested are red;
-merged is mauve; draft is overlay2. Pending checks and required review use yellow;
-unknown/no-checks/zero-thread values use overlay0; other thread counts use sapphire.
+PR icons and numbers stay flamingo (`#f2cdcd`) for every lifecycle state.
+Passing checks and approved reviews are green; failed checks and changes requested
+are red. Other check/review values use yellow, except unknown review status, which
+is muted. Thread counts use sapphire, with a muted rule for visible zero counts.
 Known zero threads are hidden by default, so that rule matters only when
 `hideZeroThreads` is false. Absent PRs clear all four tokens. Change these matchers
 if you customize icons or labels. The plugin only publishes tokens: it does not
