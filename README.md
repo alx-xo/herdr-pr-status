@@ -4,7 +4,8 @@ An early-stage public PR-status plugin for Herdr 0.9.0+, written in TypeScript a
 
 ![Herdr PR badges showing 44/44 checks with approval and 12 unresolved threads, and 46/46 checks awaiting review](docs/images/pr-status.png)
 
-*Actual Herdr sidebar showing PR checks, review states, and unresolved threads. Colors follow the user's sidebar configuration.*
+*Actual Herdr sidebar showing PR checks, review states, and unresolved threads.
+[Optional color configuration used in this screenshot](docs/sidebar.md).*
 
 ## Requirements and installation
 
@@ -151,7 +152,7 @@ The built-in Octicons are: PR open `U+F407`, draft `U+F4DD`, merged `U+F419`, cl
 
 Unknown checks/review and thread counts remain plain text. Glyph identifiers verified against [Nerd Fonts v3.4.0](https://github.com/ryanoasis/nerd-fonts/blob/v3.4.0/glyphnames.json).
 
-Herdr sidebar rows and color rules live in Herdr's config. See the [Herdr 0.9 sidebar example](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and local observation.
+Herdr sidebar rows and color rules live in Herdr's config. See the [optional sidebar color configuration](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and local observation.
 
 ## Scope and limitations
 
