@@ -2,9 +2,9 @@
 
 An early-stage public PR-status plugin for Herdr 0.9.0+, written in TypeScript and run directly with Bun. Requires Git and authenticated `gh`. Includes manual refresh and configurable polling. No GitHub writes, cache, or sidebar-layout changes.
 
-![Herdr PR badges showing 44/44 checks with approval and 12 unresolved threads, and 46/46 checks awaiting review](docs/images/pr-status.png)
+![Herdr sidebar showing marketing-site PR #2306 with failing checks at 4/7 and herdr-pr-status PR #1 with passing checks at 4/4](docs/images/pr-status.png)
 
-*Actual Herdr sidebar showing PR checks, review states, and unresolved threads.
+*Actual Herdr sidebar showing workspace branches, passing and failing PR checks, and review status.
 [Optional color configuration used in this screenshot](docs/sidebar.md).*
 
 ## Requirements and installation
