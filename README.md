@@ -13,33 +13,28 @@ GitHub CLI (`gh`) **2.101.0**, and Git **2.54.0**. macOS and Linux are supported
 CI checks both. Use a **Nerd Font v3.4-compatible** terminal font for the default icons.
 Authenticate `gh` for the repositories you want to read before using the plugin.
 
-Clone into a permanent directory (Herdr links this checkout; do not delete or move it):
+Install the GitHub source into Herdr's managed plugin directory:
 
 ```sh
-git clone https://github.com/alx-xo/herdr-pr-status.git
-cd herdr-pr-status
-bun install --frozen-lockfile
-herdr plugin link .
+herdr plugin install alx-xo/herdr-pr-status
 ```
 
-Then, from a terminal inside your running Herdr session:
+Then, from a terminal inside your existing Herdr session:
 
 ```sh
 herdr plugin action invoke alx-xo.pr-status.start
 ```
 
-The link command registers the plugin; the start action publishes workspace tokens
-and begins polling. These are installation instructions, not commands run during
-repository validation. For read-only diagnostics inside Herdr:
+Installation registers the plugin; explicit start publishes workspace tokens and
+begins polling in that session. Herdr runs the TypeScript source directly with
+Bun, not an npm package or compiled artifact. There are no runtime package
+dependencies, so users do not need `bun install` or a build step.
 
-```sh
-bun src/main.ts info
-bun src/main.ts preview  # read GitHub, print tokens; no metadata writes
-```
+See the official [Herdr 0.9.1 plugin documentation](https://github.com/herdrdev/herdr/blob/master/docs/versions/0.9.1/website/src/content/docs/plugins.mdx)
+for installation, build and startup behavior.
 
-This is a source-linked plugin, not an npm package (`private: true` is intentional).
-
-Herdr actions (after `herdr plugin link .`):
+Use Herdr actions for diagnostics and control without entering the managed
+checkout. `info` is local; `preview` reads GitHub without metadata writes:
 
 ```sh
 herdr plugin action invoke alx-xo.pr-status.info
@@ -55,11 +50,37 @@ Action acceptance only means the process started. Check the completed log and si
 
 **Before switching from another PR plugin:** disable its registration and stop its specific detached poller, if any. Shared token names can otherwise compete. Herdr tokens are per-workspace, last-update-wins patches, not per-source overlays. This plugin sets or clears only the four familiar PR tokens; unrelated tokens are left alone. Other plugins and sidebar layout are not changed automatically.
 
+## Updating or migrating an installation
+
+Registration and the managed checkout are global to the current user, but workers
+are session-local. Before replacing source, run these commands inside **each
+running Herdr session** using the plugin:
+
+```sh
+herdr plugin action invoke alx-xo.pr-status.stop
+herdr plugin action invoke alx-xo.pr-status.status
+herdr plugin log list --plugin alx-xo.pr-status --limit 3
+```
+
+Wait for the stop action's completed log, then check the completed status log for
+`running: false`. Action acceptance alone is not shutdown confirmation; repeat
+status and log checks if necessary. Only after all session workers have stopped:
+
+- **Managed update:** rerun `herdr plugin install alx-xo/herdr-pr-status`.
+  Herdr replaces the managed checkout; there is no separate update command.
+- **Local-link migration:** run `herdr plugin unlink alx-xo.pr-status`, then
+  `herdr plugin install alx-xo/herdr-pr-status`. Installing over a local link is
+  refused. Unlink leaves the local checkout files alone.
+
+Existing plugin config and state remain in place. Do not overwrite your active
+sidebar layout. After installation, explicitly invoke `alx-xo.pr-status.start` in
+each running session that should poll. Do not kill or restart the Herdr server.
+
 ## Polling
 
 Background workspaces use `pollSeconds` (**60 seconds** by default); the active workspace uses `activePollSeconds` (**30 seconds** by default). Both are integers from **15 to 3600**, measured after each workspace refresh completes. Refreshes never overlap. Local branch checks run every 2 seconds for the active workspace and on both sides of a focus change; unchanged branches do not trigger extra GitHub requests.
 
-Polling uses a one-shot Herdr startup hook to launch a session-scoped worker. Linking or enabling a plugin does not run startup hooks, so an already-running Herdr session needs the start action once. Future Herdr starts run the hook automatically. Manual refresh remains available.
+Polling uses a one-shot Herdr startup hook to launch a session-scoped worker. Installing, linking or enabling a plugin does not run startup hooks, so an already-running Herdr session needs the start action once. Future Herdr starts run the hook automatically. Manual refresh remains available.
 
 - `start`: idempotently start the worker and refresh immediately.
 - `status`: report running/waiting state, refresh count (`cycles`), and last success/error. Read the action log to see the result.
@@ -67,7 +88,7 @@ Polling uses a one-shot Herdr startup hook to launch a session-scoped worker. Li
 
 The worker watches the Herdr socket and checks plugin enablement periodically (about every five seconds) and before publishing. Disabling/unlinking the plugin or ending its Herdr session stops the worker. A later enable/relink requires the start action again. No Herdr server restart is needed.
 
-Use Herdr actions for refresh/start/stop/status: they supply the config/state/socket environment. Plain `bun src/main.ts preview` remains available inside Herdr for read-only diagnostics. Each session uses separate state under `HERDR_PLUGIN_STATE_DIR`, with bounded status/error data and a token-authenticated localhost control endpoint. Kernel file locks via Bun FFI prevent duplicate workers and serialize manual/polling refreshes, and release automatically on crashes. Locks require macOS or Linux libc and Bun FFI support. A manual refresh waits up to 30 seconds for an active refresh, then fails with a busy diagnostic rather than overlapping. Crashed workers do not auto-respawn; use start or the next Herdr startup.
+Use Herdr actions for refresh/start/stop/status: they supply the config/state/socket environment. Use the `preview` action for read-only diagnostics. Each session uses separate state under `HERDR_PLUGIN_STATE_DIR`, with bounded status/error data and a token-authenticated localhost control endpoint. Kernel file locks via Bun FFI prevent duplicate workers and serialize manual/polling refreshes, and release automatically on crashes. Locks require macOS or Linux libc and Bun FFI support. A manual refresh waits up to 30 seconds for an active refresh, then fails with a busy diagnostic rather than overlapping. Crashed workers do not auto-respawn; use start or the next Herdr startup.
 
 GitHub/authentication failures are retried after the workspace’s polling interval without clearing prior metadata. Config changes are picked up during local observation (normally every 2 seconds). Per-workspace errors do not prevent other workspaces from updating. Polling makes read-only GitHub requests for each eligible workspace; a longer interval reduces API usage.
 
@@ -140,12 +161,24 @@ Herdr sidebar rows and color rules live in Herdr's config. See the [Herdr 0.9 si
 - Check counts use `gh pr checks --json state`, which paginates contexts and selects current runs rather than counting superseded attempts. Successful reruns replace older failures/cancellations; a current cancellation still counts as failed. Raw `pr list` rollups are used only to distinguish missing/empty check data, not for totals.
 - Status is a snapshot: GitHub/branch changes appear on the next successful workspace refresh. A branch switch during a lookup discards that result instead of publishing it for the wrong branch. Network/authentication failures retain potentially stale metadata until a successful retry.
 - No notifications, board, review pane, GitHub mutation, release pipeline, standalone binary, Node compatibility work, or marketplace publication.
-- Keep settings and polling control state outside the linked source checkout, in Herdr's supplied config/state directories.
+- Keep settings and polling control state outside the managed or linked source checkout, in Herdr's supplied config/state directories.
 
 ## Development
 
+For local development, clone into a permanent directory: Herdr links this
+checkout, so do not move or delete it while linked.
+
 ```sh
+git clone https://github.com/alx-xo/herdr-pr-status.git
+cd herdr-pr-status
 bun install --frozen-lockfile
+herdr plugin link .
+```
+
+Linking does not run build hooks. In an existing Herdr session, explicitly invoke
+`alx-xo.pr-status.start` as above. Development checks:
+
+```sh
 bun run typecheck
 bun test
 bun run build
