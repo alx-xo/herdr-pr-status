@@ -24,11 +24,20 @@ rows = [
   ["branch", "git_status"],
   [
     { token = "$pr", fg = "#f2cdcd" },
-    { token = "$pr_checks", fg = "#f9e2af", rules = [{ starts_with = "\uF42E", fg = "#a6e3a1" }, { starts_with = "\uF467", fg = "#f38ba8" }] },
-    { token = "$pr_review", fg = "#f9e2af", rules = [{ starts_with = "\uF49E", fg = "#a6e3a1" }, { starts_with = "\uF440", fg = "#f38ba8" }, { equals = "review ?", fg = "#6c7086" }] },
+    { token = "$pr_checks", fg = "#f9e2af", rules = [
+      { starts_with = "\uF42E", fg = "#a6e3a1" },
+      { starts_with = "\uF467", fg = "#f38ba8" },
+    ] },
+    { token = "$pr_review", fg = "#f9e2af", rules = [
+      { starts_with = "\uF49E", fg = "#a6e3a1" },
+      { starts_with = "\uF440", fg = "#f38ba8" },
+      { equals = "review ?", fg = "#6c7086" },
+    ] },
   ],
   [
-    { token = "$pr_threads", fg = "#74c7ec", rules = [{ equals = "0 threads", fg = "#6c7086" }] },
+    { token = "$pr_threads", fg = "#74c7ec", rules = [
+      { equals = "0 threads", fg = "#6c7086" },
+    ] },
   ],
 ]
 ```
