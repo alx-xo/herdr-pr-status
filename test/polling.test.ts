@@ -252,7 +252,7 @@ if(tool==='herdr') {
 } else if(tool==='git') {
   if(args[0]==='rev-parse') console.log(args[1]==='--absolute-git-dir'?repo+'/.git':repo);
   else if(args[0]==='remote') console.log(args[1]==='get-url'?'https://github.com/test/repo':'origin');
-  else if(args[0]==='for-each-ref') console.log('');
+  else if(args[0]==='for-each-ref' || args[0]==='config') console.log('');
   else if(args[0]==='branch') {
     const value=branch();
     if(${JSON.stringify(scenario)}==='lock' && value==='queued') await gate('release-observation');

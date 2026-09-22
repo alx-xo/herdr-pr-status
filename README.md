@@ -154,16 +154,6 @@ Unknown checks/review and thread counts remain plain text. Glyph identifiers ver
 
 Herdr sidebar rows and color rules live in Herdr's config. See the [optional sidebar color configuration](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and local observation.
 
-## Scope and limitations
-
-- Prefer workspace worktree paths. Otherwise normalize pane working directories to Git roots and require one unambiguous checkout. Non-Git workspaces and checkouts without remotes are skipped.
-- Git branch/push-remote identity is used to verify the PR head; detached HEAD has no branch PR. For forks, this plugin searches both the fork and its parent and rejects ambiguous open matches. It prefers an open PR, otherwise the most recently updated matching terminal PR. Lists hitting the 100-result limit fail explicitly. GitHub lookup errors do not become no-PR results.
-- Missing Git push refs are resolved using `push.default`; unresolved refspecs and ambiguous push destinations fail rather than guessing a PR head.
-- Check counts use `gh pr checks --json state`, which paginates contexts and selects current runs rather than counting superseded attempts. Successful reruns replace older failures/cancellations; a current cancellation still counts as failed. Raw `pr list` rollups are used only to distinguish missing/empty check data, not for totals.
-- Status is a snapshot: GitHub/branch changes appear on the next successful workspace refresh. A branch switch during a lookup discards that result instead of publishing it for the wrong branch. Network/authentication failures retain potentially stale metadata until a successful retry.
-- No notifications, board, review pane, GitHub mutation, release pipeline, standalone binary, Node compatibility work, or marketplace publication.
-- Keep settings and polling control state outside the managed or linked source checkout, in Herdr's supplied config/state directories.
-
 ## Development
 
 For local development, clone into a permanent directory: Herdr links this

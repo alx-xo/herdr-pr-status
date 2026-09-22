@@ -22,9 +22,17 @@ function object(value: unknown): ObjectValue {
 function repository(url: string): { host: string; name: string } {
   // Git's usual HTTPS, ssh:// and scp-style remote URLs. Never guess a repo
   // from a local path or an unrecognised remote.
-  const normalized = url.replace(/^([^/@]+@)?([^/:]+):([^/].*)$/, "ssh://$2/$3");
+  // Reject syntax URL normalization would silently discard or reinterpret.
+  // Encoded HTTP credentials do not participate in repository identity.
+  const identityURL = url.replace(/^(https?:\/\/)[^/?#]*@/i, "$1");
+  if (/[\\?#\s]/.test(url) || identityURL.includes("%") || /(?:^|[/:])\.{1,2}(?:\/|$)/.test(url)) {
+    throw new Error("Cannot identify GitHub remote repository");
+  }
+  const normalized = url.includes("://") ? url
+    : url.replace(/^([^/@]+@)?([^/:]+):([^/].*)$/, "ssh://$2/$3");
   const parsed = new URL(normalized);
-  if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) || !parsed.hostname) {
+  if (!["https:", "http:", "ssh:", "git:"].includes(parsed.protocol) || !parsed.hostname
+      || (["https:", "http:"].includes(parsed.protocol) && parsed.port)) {
     throw new Error("Cannot identify GitHub remote repository");
   }
   const name = parsed.pathname.replace(/^\//, "").replace(/\/?$/, "").replace(/\.git$/, "");
@@ -101,27 +109,59 @@ export async function lookupPR(cwd: string, run: Runner = runCommand): Promise<P
   const tracking = (await run(["git", "for-each-ref",
     "--format=%(push:remotename)%09%(push:remoteref)%09%(upstream:remotename)%09%(upstream:remoteref)",
     `refs/heads/${branch}`], cwd)).trimEnd().split("\t");
-  const remote = tracking[0] || tracking[2] || "origin";
-  let remoteRef = tracking[0] ? tracking[1] : tracking[3];
-  if (tracking[0] && !remoteRef) {
-    // Git can report a push remote without a push ref (notably upstream mode).
-    // Ref mappings Git could not resolve are outside this POC: never guess.
-    const refspec = (await run(["git", "config", "--get", "--default", "", `remote.${remote}.push`], cwd)).trim();
-    const mode = (await run(["git", "config", "--get", "--default", "simple", "push.default"], cwd)).trim();
-    if (refspec) throw new Error("Cannot resolve configured push refspec");
-    const triangular = Boolean(tracking[2]) && remote !== tracking[2];
-    if (mode === "upstream" && !triangular && tracking[3]?.startsWith("refs/heads/")) {
-      remoteRef = tracking[3];
+  // Read effective config (including includes/worktree config) without executing
+  // transports. Preserve repeated push refspecs instead of silently taking one.
+  const config = new Map<string, string[]>();
+  for (const entry of (await run(["git", "config", "--null", "--list"], cwd)).split("\0")) {
+    if (!entry) continue;
+    const separator = entry.indexOf("\n");
+    const key = separator < 0 ? entry : entry.slice(0, separator);
+    const value = separator < 0 ? "true" : entry.slice(separator + 1);
+    config.set(key, [...(config.get(key) ?? []), value]);
+  }
+  const get = (key: string) => config.get(key)?.at(-1);
+  let remote = get(`branch.${branch}.pushremote`) ?? get("remote.pushdefault")
+    ?? get(`branch.${branch}.remote`);
+  if (remote === undefined) {
+    const remotes = (await run(["git", "remote"], cwd)).trim().split("\n").filter(Boolean);
+    remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : undefined;
+  }
+  if (!remote) throw new Error("Cannot resolve unambiguous push remote");
+  if (remote === ".") throw new Error("Branch tracks a local repository, not GitHub");
+  const mirror = get(`remote.${remote}.mirror`);
+  if (mirror !== undefined && (await run(["git", "config", "--type=bool", "--get",
+    `remote.${remote}.mirror`], cwd)).trim() !== "false") {
+    throw new Error("Cannot resolve mirror push destination");
+  }
+  const refspecs = config.get(`remote.${remote}.push`) ?? [];
+  let remoteRef: string | undefined;
+  if (refspecs.length) {
+    // Git resolves supported mappings. Multiple mappings can push this branch
+    // to more than one head; even a plausible atom is not sufficient evidence.
+    if (refspecs.length !== 1 || tracking[0] !== remote || !tracking[1]?.startsWith("refs/heads/")) {
+      throw new Error("Cannot resolve configured push refspec");
+    }
+    remoteRef = tracking[1];
+  } else {
+    const mode = get("push.default") ?? "simple";
+    const upstreamRemote = get(`branch.${branch}.remote`);
+    const upstreamRefs = config.get(`branch.${branch}.merge`) ?? [];
+    const upstreamRef = upstreamRefs.length === 1 ? upstreamRefs[0] : undefined;
+    const triangular = remote !== (upstreamRemote ?? "origin");
+    if (mode === "upstream" && !triangular && upstreamRef?.startsWith("refs/heads/")) {
+      remoteRef = upstreamRef;
     } else if (mode === "current" || (mode === "simple" &&
-        (triangular || !tracking[2] || tracking[3] === `refs/heads/${branch}`))) {
+        (triangular || upstreamRefs.length === 0 || upstreamRef === `refs/heads/${branch}`))) {
       remoteRef = `refs/heads/${branch}`;
     } else {
       throw new Error("Cannot resolve unambiguous push branch");
     }
   }
-  if (remote === ".") throw new Error("Branch tracks a local repository, not GitHub");
-  const head = remoteRef?.startsWith("refs/heads/") ? remoteRef.slice(11) : branch;
-  const remoteURL = (await run(["git", "remote", "get-url", ...(tracking[0] ? ["--push"] : []), remote], cwd)).trim();
+  const head = remoteRef.slice(11);
+  // get-url expands insteadOf/pushInsteadOf and exposes every push destination.
+  const urls = (await run(["git", "remote", "get-url", "--push", "--all", remote], cwd)).trim().split("\n");
+  if (urls.length !== 1 || !urls[0]) throw new Error("Cannot resolve unambiguous push URL");
+  const remoteURL = urls[0];
   const headRepo = repository(remoteURL);
   // Resolve the selected remote explicitly; gh's checkout default may be unrelated.
   const repo = object(JSON.parse(await run(["gh", "repo", "view", `${headRepo.host}/${headRepo.name}`,
