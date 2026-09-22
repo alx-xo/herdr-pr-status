@@ -23,6 +23,7 @@ export class Scheduler {
     // Equal jitter: 15–30s initially, doubling to a 150–300s ceiling.
     const ceiling = Math.min(300000, 30000 * 2 ** Math.min(this.serviceFailures++, 4));
     this.serviceRetryAt = now + Math.floor(ceiling * (0.5 + this.random() / 2));
+    if (this.flight) this.flight.serviceRetry = true;
     if (knownRetryAt !== undefined) this.rateLimitUntil = Math.max(this.rateLimitUntil, knownRetryAt);
   }
   serviceSuccess() {
@@ -34,7 +35,7 @@ export class Scheduler {
   focused?: string;
   focusVersion = 0;
   private checks = new Set<string>();
-  private flight?: { id: string; entry: Entry; version: number };
+  private flight?: { id: string; entry: Entry; version: number; serviceRetry?: true };
   focus(id: string) {
     if (id === this.focused) return;
     this.focusVersion++;
@@ -102,8 +103,11 @@ export class Scheduler {
     if (!flight || this.entries.get(flight.id) !== flight.entry) return;
     const entry = flight.entry;
     entry.completed = now;
-    entry.pending ||= flight.version !== entry.version;
-    entry.retryAt = failed ? now + this.interval(flight.id, config) : 0;
+    // A transient failure is pending retry work, not a completed periodic poll.
+    // The shared service deadline (including explicit cooldown) gates eligibility.
+    const serviceRetry = failed && flight.serviceRetry === true;
+    entry.pending ||= serviceRetry || flight.version !== entry.version;
+    entry.retryAt = failed && !serviceRetry ? now + this.interval(flight.id, config) : 0;
     // Move completed work to the tail so branch churn cannot starve other workspaces.
     this.entries.delete(flight.id); this.entries.set(flight.id, entry);
   }

@@ -228,3 +228,47 @@ test('sleep recovery coalesces missed polls and completing work still schedules 
   expect(s.take(resumed + 30099, defaults)).toBeUndefined();
   expect(s.take(resumed + 30100, defaults)?.workspace_id).toBe('a');
 });
+
+for (const pollSeconds of [60, 3600]) {
+  test(`transient completion retries at reported deadline instead of ${pollSeconds}s interval`, () => {
+    const s = new Scheduler(() => 0);
+    const config = { ...defaults, pollSeconds, activePollSeconds: pollSeconds };
+    s.reconcile([a]);
+    expect(s.take(0, config)?.workspace_id).toBe('a');
+    s.serviceFailure(1000);
+    s.complete(2000, config, true);
+    expect(s.nextRetryAt).toBe(16000);
+    expect(s.take(15999, config)).toBeUndefined();
+    expect(s.take(16000, config)?.workspace_id).toBe('a');
+    expect(s.take(16000, config)).toBeUndefined();
+    s.serviceFailure(17000, 400000);
+    s.complete(18000, config, true);
+    expect(s.nextRetryAt).toBe(400000);
+    expect(s.take(399999, config)).toBeUndefined();
+    expect(s.take(400000, config)?.workspace_id).toBe('a');
+    s.serviceSuccess();
+    s.complete(401000, config, false);
+    expect(s.take(401001, config)).toBeUndefined();
+    expect(s.take(401000 + pollSeconds * 1000, config)?.workspace_id).toBe('a');
+  });
+}
+
+test('transient retries retain FIFO fairness and the capped deadline through completion', () => {
+  const s = new Scheduler(() => 0);
+  const config = { ...defaults, pollSeconds: 3600, activePollSeconds: 3600 };
+  s.reconcile([a, b]);
+  expect(s.take(0, config)?.workspace_id).toBe('a');
+  s.serviceFailure(0); s.complete(1, config, true);
+  expect(s.take(15000, config)?.workspace_id).toBe('b');
+  expect(s.take(15000, config)).toBeUndefined();
+  s.serviceSuccess(); s.complete(15001, config, false);
+  expect(s.take(15001, config)?.workspace_id).toBe('a');
+  let now = 15001;
+  for (const deadline of [30001, 60001, 120001, 240001, 390001, 540001]) {
+    s.serviceFailure(now); s.complete(now + 1, config, true);
+    expect(s.nextRetryAt).toBe(deadline);
+    expect(s.take(deadline - 1, config)).toBeUndefined();
+    expect(s.take(deadline, config)?.workspace_id).toBe('a');
+    now = deadline;
+  }
+});
