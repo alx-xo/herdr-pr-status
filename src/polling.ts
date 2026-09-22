@@ -1,20 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { createConnection, createServer } from 'node:net';
 import { spawn } from 'node:child_process';
-import { defaults, parseConfig, type Config } from './format';
-import { herdrBin, listWorkspaces } from './herdr';
+import { defaults, formatPR, parseConfig, type Config } from './format';
+import { herdrBin, listWorkspaces, publishTokens } from './herdr';
 import { runCommand, type Runner } from './process';
-import { refresh, StaleCheckoutError } from './refresh';
+import { refresh, StaleCheckoutError, type RefreshState, type RefreshResult, type Publisher } from './refresh';
 import { serialized, tryLock } from './locking';
 
 import { Scheduler } from './scheduler';
-import { localIdentity, workspaceLoop } from './workspace-loop';
+import { localIdentity, observedCheckout, workspaceLoop } from './workspace-loop';
 import { subscribe } from './subscription';
+import { sanitize } from './feedback';
 
 const id = 'alx-xo.pr-status';
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+const message = (error: unknown) => sanitize(error instanceof Error ? error.message : String(error));
 export async function loadConfig(): Promise<Config> {
   const dir = process.env.HERDR_PLUGIN_CONFIG_DIR || (await runCommand([herdrBin(), 'plugin', 'config-dir', id])).trim();
   if (!dir || !isAbsolute(dir)) throw new Error('Herdr must supply an absolute HERDR_PLUGIN_CONFIG_DIR');
@@ -53,24 +54,58 @@ export async function enabled(run: Runner = runCommand): Promise<boolean> {
   return data.result.plugins.some((plugin: { plugin_id: string; enabled: boolean }) => plugin.plugin_id === id && plugin.enabled === true);
 }
 
-export async function control(s: Session, command: 'status' | 'stop'): Promise<Record<string, unknown>> {
+// Whole refresh/preview results are returned or explicitly rejected, never silently cut.
+const controlResponseLimit = 256 * 1024;
+class ControlResponseError extends Error {}
+function controlResponse(value: Record<string, unknown>): string {
+  const json = JSON.stringify(value);
+  return Buffer.byteLength(json) <= controlResponseLimit ? json : JSON.stringify({
+    code: 'RESPONSE_TOO_LARGE',
+    error: 'Poller response exceeds the 256 KiB limit. Reduce workspace count or shorten labels and retry; status shows bounded diagnostics.',
+  });
+}
+
+/** Status snapshots prioritize failures, bound user-controlled strings, and declare omissions. */
+function statusSnapshot(state: CycleState) {
+  const bounded = (value: string, size: number) => sanitize(value.slice(0, size)).slice(0, size);
+  const results = state.workspaces ?? [];
+  const ordered = [...results.filter(result => result.status === 'error'), ...results.filter(result => result.status !== 'error')];
+  return { ...state, workspaces: ordered.slice(0, 100).map(result => ({ ...result,
+    workspace: bounded(result.workspace, 128), label: bounded(result.label, 128),
+    cwd: result.cwd === undefined ? undefined : bounded(result.cwd, 512),
+    reason: result.reason === undefined ? undefined : bounded(result.reason, 512),
+    action: result.action === undefined ? undefined : bounded(result.action, 512),
+  })), omittedWorkspaces: Math.max(0, results.length - 100) };
+}
+
+export async function control(s: Session, command: 'status' | 'stop' | 'refresh' | 'preview'): Promise<Record<string, unknown>> {
   const endpoint = JSON.parse(await readFile(s.control, 'utf8'));
   if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 || typeof endpoint.token !== 'string') throw new Error('Invalid poller endpoint');
   return new Promise((resolve, reject) => {
     const client = createConnection({ host: '127.0.0.1', port: endpoint.port });
-    let text = '';
-    client.setTimeout(2000, () => client.destroy(new Error('Poller control timed out')));
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    client.setTimeout(command === 'refresh' || command === 'preview' ? 120000 : 2000, () => client.destroy(new Error('Poller control timed out')));
     client.on('connect', () => client.write(`${endpoint.token} ${command}\n`));
     client.on('error', reject);
     client.on('data', data => {
-      text += data.toString();
-      if (text.length > 8192) client.destroy(new Error('Invalid poller response'));
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      bytes += chunk.length;
+      if (bytes > controlResponseLimit) { client.destroy(new ControlResponseError('Poller response exceeds the 256 KiB limit; reduce workspace count or shorten labels and retry')); return; }
+      chunks.push(chunk);
     });
-    client.on('end', () => { try { resolve(JSON.parse(text)); } catch (error) { reject(error); } });
+    client.on('end', () => {
+      try {
+        const response = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (response.code === 'RESPONSE_TOO_LARGE') throw new ControlResponseError(response.error);
+        resolve(response);
+      } catch (error) { reject(error); }
+    });
   });
 }
 export async function status(s: Session): Promise<Record<string, unknown>> {
-  try { return await control(s, 'status'); } catch {
+  try { return await control(s, 'status'); } catch (error) {
+    if (error instanceof ControlResponseError) throw error;
     const release = tryLock(join(s.dir, 'worker.lock'));
     if (!release) return { running: true, state: 'starting or stopping', session: s.identity };
     release();
@@ -112,7 +147,12 @@ export async function start(s: Session): Promise<Record<string, unknown>> {
     throw new Error('Poller did not become ready; check status and verify Bun FFI is available');
   });
 }
-export async function manualRefresh(s: Session, config: Config) {
+export async function manualRefresh(s: Session, config: Config, memory?: RefreshState, preview = false): Promise<RefreshResult[]> {
+  if (!memory && (await status(s)).running) {
+    const response = await control(s, preview ? 'preview' : 'refresh');
+    if (!Array.isArray(response.results)) throw new Error('Live refresh failed; inspect status and retry');
+    return response.results as RefreshResult[];
+  }
   return serialized(join(s.dir, 'refresh.lock'), async () => {
     if (!await sameSession(s) || !await enabled()) throw new Error('Herdr session ended or plugin is disabled/unlinked');
     const guarded: Runner = async (args, cwd) => {
@@ -121,12 +161,28 @@ export async function manualRefresh(s: Session, config: Config) {
       if (!await sameSession(s)) throw new Error('Herdr session ended');
       return runCommand(args, cwd);
     };
-    return refresh(config, false, guarded);
+    const publish: Publisher = (id, tokens, validate) => publishTokens(id, tokens, async args => {
+      if (!await sameSession(s) || !await enabled()) throw new Error('Herdr session ended or plugin is disabled/unlinked');
+      if (!await sameSession(s)) throw new Error('Herdr session ended');
+      await validate();
+      return runCommand(args);
+    });
+    return refresh(config, preview, guarded, undefined, memory, publish);
   });
 }
+export async function previewRefresh(config: Config): Promise<RefreshResult[]> {
+  if (process.env.HERDR_PLUGIN_STATE_DIR && process.env.HERDR_SOCKET_PATH) {
+    return manualRefresh(await session(), config, undefined, true);
+  }
+  return refresh(config, true);
+}
+
+class RefreshFailed extends Error {}
+
 export interface CycleState {
   running: boolean; state: string; cycles: number; startedAt: string;
   lastSuccessAt?: string; lastErrorAt?: string; lastError?: string; nextRunAt?: string;
+  workspaces?: Omit<RefreshResult, 'tokens'>[];
 }
 export interface LoopOptions {
   load: () => Promise<Config>;
@@ -173,7 +229,19 @@ export async function worker(s: Session): Promise<void> {
   let signaled = false;
   const scheduler = new Scheduler();
   const state: CycleState = { running: true, state: 'starting', cycles: 0, startedAt: new Date().toISOString() };
-  const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(state), { mode: 0o600 }); };
+  const memory: RefreshState = new Map();
+  const recordResults = (results: RefreshResult[]) => {
+    const diagnostics = new Map(state.workspaces?.map(result => [result.workspace, result]));
+    for (const { tokens: _tokens, ...result } of results) diagnostics.set(result.workspace, result);
+    state.workspaces = [...diagnostics.values()];
+    const errors = state.workspaces.filter(result => result.status === 'error');
+    if (errors.length) {
+      state.lastError = sanitize(`${errors.length} workspace refresh(es) failed. ${errors[0]!.reason} ${errors[0]!.action} See workspace diagnostics.`);
+      state.lastErrorAt = new Date().toISOString();
+    } else delete state.lastError;
+    if (results.some(result => result.freshness === 'fresh')) state.lastSuccessAt = new Date().toISOString();
+  };
+  const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(statusSnapshot(state)), { mode: 0o600 }); };
   const stop = () => { active = false; state.state = 'stopping'; wake(); };
   const token = randomUUID();
   const server = createServer(client => {
@@ -187,7 +255,20 @@ export async function worker(s: Session): Promise<void> {
       const [secret, cmd] = request.trim().split(' ');
       if (secret !== token) { client.destroy(); return; }
       if (cmd === 'stop') stop();
-      client.end(JSON.stringify(cmd === 'stop' || cmd === 'status' ? state : { error: 'Unknown command' }));
+      if (cmd === 'refresh' || cmd === 'preview') {
+        client.setTimeout(120000);
+        void loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview')).then(async results => {
+          if (cmd === 'refresh') {
+            recordResults(results);
+            for (const result of results) if (result.stale) scheduler.requeue(result.workspace);
+            if (results.some(result => result.stale)) { signaled = true; wake(); }
+            await save();
+          }
+          client.end(controlResponse({ results }));
+        }).catch(error => client.end(controlResponse({ error: message(error) })));
+        return;
+      }
+      client.end(controlResponse(cmd === 'stop' || cmd === 'status' ? statusSnapshot(state) : { error: 'Unknown command' }));
     });
   });
   let watching = false;
@@ -238,9 +319,34 @@ export async function worker(s: Session): Promise<void> {
     }, 1000);
     await workspaceLoop({
       scheduler, load: loadConfig, active: () => active,
-      list: () => listWorkspaces(guarded),
-      local: workspace => localIdentity(workspace, guarded),
-      error: error => { state.lastError = message(error); state.lastErrorAt = new Date().toISOString(); },
+      list: async () => {
+        const workspaces = await listWorkspaces(guarded);
+        const ids = new Set(workspaces.map(workspace => workspace.workspace_id));
+        for (const id of memory.keys()) if (!ids.has(id)) memory.delete(id);
+        state.workspaces = state.workspaces?.filter(result => ids.has(result.workspace));
+        return workspaces;
+      },
+      local: async workspace => {
+        const current = await localIdentity(workspace, guarded);
+        const entry = scheduler.entries.get(workspace.workspace_id);
+        const retained = memory.get(workspace.workspace_id);
+        if (entry?.identity !== undefined && entry.identity !== current && retained) {
+          const { root, branch } = observedCheckout(current);
+          if (root !== await realpath(retained.cwd).catch(() => undefined) || branch !== retained.branch) {
+            await publishTokens(workspace.workspace_id, formatPR(null), async args => {
+              await checkCommand(args);
+              if (memory.get(workspace.workspace_id) !== retained) return '';
+              memory.delete(workspace.workspace_id);
+              state.workspaces = state.workspaces?.filter(result => result.workspace !== workspace.workspace_id);
+              return runCommand(args);
+            });
+          }
+        }
+        return current;
+      },
+      error: error => {
+        if (!(error instanceof RefreshFailed)) { state.lastError = message(error); state.lastErrorAt = new Date().toISOString(); }
+      },
       settled: async initial => {
         if (!initial || scheduler.entries.size === 0) state.cycles++;
         state.state = active ? 'waiting' : 'stopping';
@@ -260,17 +366,18 @@ export async function worker(s: Session): Promise<void> {
         if (!scheduler.consume(workspace.workspace_id, before)) return;
         const version = entry.version;
         state.state = 'refreshing'; delete state.nextRunAt;
-        const publishGuard: Runner = async (args, cwd) => {
-          if (!args.includes('report-metadata')) return guarded(args, cwd);
+        const publish: Publisher = (id, tokens, validate) => publishTokens(id, tokens, async args => {
           await checkCommand(args);
           // Validate after enablement/session waits, with no further await before spawn.
           const current = await localIdentity(entry.workspace, guarded);
           scheduler.observe(workspace.workspace_id, current);
           if (!active) throw new Error('Poller stopped');
-          if (scheduler.entries.get(workspace.workspace_id) !== entry || entry.version !== version || current !== before) throw new StaleCheckoutError('Checkout changed during lookup; retry on next refresh');
-          return runCommand(args, cwd);
-        };
-        const results = await refresh(config, false, publishGuard, [entry.workspace]);
+          if (scheduler.entries.get(workspace.workspace_id) !== entry || ((entry.version !== version || current !== before) && args.includes('--token'))) throw new StaleCheckoutError('Checkout changed during lookup; retry on next refresh');
+          await validate();
+          return runCommand(args);
+        });
+        const results = await refresh(config, false, guarded, [entry.workspace], memory, publish);
+        recordResults(results);
         if (results.some(result => result.stale)) {
           // An unfocused checkout has no periodic local observer. Requeue even
           // if it switched away and back before this final identity read.
@@ -278,9 +385,7 @@ export async function worker(s: Session): Promise<void> {
           const current = scheduler.entries.get(workspace.workspace_id);
           if (current) scheduler.observe(workspace.workspace_id, await localIdentity(current.workspace, guarded));
         }
-        const errors = results.filter(result => result.status === 'error');
-        if (errors.length) throw new Error(errors.map(result => result.reason).join('; '));
-        state.lastSuccessAt = new Date().toISOString(); delete state.lastError;
+        if (results.some(result => result.status === 'error')) throw new RefreshFailed();
       }),
     });
   } catch (error) {

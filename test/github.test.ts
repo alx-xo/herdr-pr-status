@@ -129,7 +129,7 @@ describe("branch PR identity", () => {
 describe("absence and failures", () => {
   test("detached HEAD stops before network requests", async () => {
     const { run, calls } = fixture({ branch: "\n" });
-    expect(await lookupPR(cwd, run)).toBeNull();
+    await expect(lookupPR(cwd, run)).rejects.toMatchObject({ category: 'unresolved' });
     expect(calls).toHaveLength(1);
   });
   test("successful empty or nonmatching list is confirmed absence", async () => {
@@ -323,5 +323,33 @@ describe("canonical GitHub host identity", () => {
       await expect(lookupPR(cwd, run)).rejects.toThrow();
       expect(calls.some(args => args[0] === "gh")).toBe(false);
     });
+  }
+});
+
+test('lookup failures carry actionable categories without exposing command secrets', async () => {
+  for (const [message, category] of [
+    ['HTTP 401: Bad credentials', 'authentication'],
+    ['GraphQL: Could not resolve to a Repository', 'repository'],
+    ['HTTP 403: API rate limit exceeded', 'service'],
+    ['dial tcp: network is unreachable', 'service'],
+    ['unexpected response', 'unknown'],
+  ]) {
+    const base = fixture().run;
+    const run: Runner = (args, cwd) => args[0] === 'gh'
+      ? Promise.reject(new Error(`${message} https://user:secret@github.com/private/repo?token=secret`)) : base(args, cwd);
+    try { await lookupPR(cwd, run); throw new Error('expected failure'); }
+    catch (error) {
+      expect(error).toMatchObject({ category, action: expect.any(String) });
+      expect(String(error)).not.toContain('secret');
+    }
+  }
+});
+
+test('authorization schemes and credentials are redacted from lookup errors', async () => {
+  for (const credentials of ['Basic dXNlcjpwYXNz', 'Bearer tokenvalue', 'Digest username="private", response="secret"']) {
+    const base = fixture().run;
+    const run: Runner = (args, cwd) => args[0] === 'gh'
+      ? Promise.reject(new Error(`HTTP 401\nAuthorization: ${credentials}\nrequest failed`)) : base(args, cwd);
+    await expect(lookupPR(cwd, run)).rejects.not.toThrow(credentials.split(' ')[1]!);
   }
 });

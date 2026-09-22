@@ -154,6 +154,8 @@ Unknown checks/review and thread counts remain plain text. Glyph identifiers ver
 
 Herdr sidebar rows and color rules live in Herdr's config. See the [optional sidebar color configuration](docs/sidebar.md) for copyable rows and Catppuccin Mocha colors matching the default tokens. Merge it into your existing sidebar configuration; do not replace your full config. Custom icon or label overrides may require corresponding color-rule changes. The plugin does not modify Herdr config automatically. Settings are reread on manual refresh and local observation.
 
+Failed refreshes show `⚠` (alongside the last known badges only for the same branch and repository). `status` and `preview` report the reason, next action, and refresh freshness; a successful lookup clears the warning.
+
 ## Development
 
 For local development, clone into a permanent directory: Herdr links this

@@ -15,6 +15,12 @@ export async function localIdentity(workspace: Workspace, run: Runner): Promise<
   return JSON.stringify([root, String(info.dev), String(info.ino), gitDir, String(gitInfo.dev), String(gitInfo.ino), branch]);
 }
 
+/** Access named checkout fields without exposing the opaque identity's layout. */
+export function observedCheckout(identity: string): { root: string | null; branch?: string } {
+  const [root, , , , , , branch] = JSON.parse(identity) as [string | null, unknown?, unknown?, unknown?, unknown?, unknown?, string?];
+  return { root, branch: typeof branch === 'string' ? branch : undefined };
+}
+
 interface Options {
   scheduler: Scheduler;
   now?: () => number;

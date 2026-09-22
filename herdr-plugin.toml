@@ -1,6 +1,6 @@
 id = "alx-xo.pr-status"
 name = "PR Status"
-version = "0.2.1"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
 description = "Early-stage public plugin for customizable polling PR status"
 platforms = ["macos", "linux"]

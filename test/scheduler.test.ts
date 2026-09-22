@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { defaults, parseConfig } from '../src/format';
 import { Scheduler } from '../src/scheduler';
-import { localIdentity, workspaceLoop } from '../src/workspace-loop';
+import { localIdentity, observedCheckout, workspaceLoop } from '../src/workspace-loop';
 
 import { mkdtemp, mkdir, rename, rm } from 'node:fs/promises';
 import type { Runner } from '../src/process';
@@ -174,7 +174,9 @@ test('local identity detects checkout replacement and detached transitions witho
     const w = { ...a, worktree: { checkout_path: root } };
     const initial = await localIdentity(w, run);
     expect(await localIdentity(w, run)).toBe(initial);
+    expect(observedCheckout(initial)).toMatchObject({ root: expect.stringContaining('pr-local-'), branch: 'main' });
     branch = '';
+    expect(observedCheckout(await localIdentity(w, run)).branch).toBe('');
     expect(await localIdentity(w, run)).not.toBe(initial);
     branch = 'main';
     await rename(`${root}/.git`, `${root}/old-git`); await mkdir(`${root}/.git`);
