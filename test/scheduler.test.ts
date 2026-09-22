@@ -194,3 +194,81 @@ test('consumption resets preflight changes but retains observations after lookup
   s.observe('a', 'during'); s.complete(6000, defaults, false);
   expect(s.take(6000, defaults)?.workspace_id).toBe('a');
 });
+
+test('service backoff is shared, jittered, capped and manual only bypasses unknown timing', () => {
+  const s = new Scheduler(() => 0);
+  s.reconcile([a, b]);
+  s.serviceFailure(1000);
+  expect(s.nextRetryAt).toBe(16000);
+  expect(s.take(15999, defaults)).toBeUndefined();
+  expect(s.canRefresh(1001, true)).toBe(true);
+  s.serviceFailure(16000, 100000);
+  expect(s.nextRetryAt).toBe(100000);
+  expect(s.canRefresh(99999, true)).toBe(false);
+  expect(s.canRefresh(100000, true)).toBe(true);
+  s.serviceSuccess();
+  s.serviceFailure(100000);
+  expect(s.nextRetryAt).toBe(115000);
+  for (let i = 0; i < 20; i++) s.serviceFailure(100000);
+  expect(s.nextRetryAt).toBe(250000);
+  const upper = new Scheduler(() => 1);
+  for (let i = 0; i < 20; i++) upper.serviceFailure(0);
+  expect(upper.nextRetryAt).toBe(300000);
+});
+
+test('sleep recovery coalesces missed polls and completing work still schedules from completion', () => {
+  const s = ready();
+  const resumed = 86400000;
+  expect(s.take(resumed, defaults)?.workspace_id).toBe('a');
+  expect(s.take(resumed, defaults)).toBeUndefined();
+  s.complete(resumed + 100, defaults, false);
+  expect(s.take(resumed + 100, defaults)?.workspace_id).toBe('b');
+  s.complete(resumed + 200, defaults, false);
+  expect(s.take(resumed + 200, defaults)).toBeUndefined();
+  expect(s.take(resumed + 30099, defaults)).toBeUndefined();
+  expect(s.take(resumed + 30100, defaults)?.workspace_id).toBe('a');
+});
+
+for (const pollSeconds of [60, 3600]) {
+  test(`transient completion retries at reported deadline instead of ${pollSeconds}s interval`, () => {
+    const s = new Scheduler(() => 0);
+    const config = { ...defaults, pollSeconds, activePollSeconds: pollSeconds };
+    s.reconcile([a]);
+    expect(s.take(0, config)?.workspace_id).toBe('a');
+    s.serviceFailure(1000);
+    s.complete(2000, config, true);
+    expect(s.nextRetryAt).toBe(16000);
+    expect(s.take(15999, config)).toBeUndefined();
+    expect(s.take(16000, config)?.workspace_id).toBe('a');
+    expect(s.take(16000, config)).toBeUndefined();
+    s.serviceFailure(17000, 400000);
+    s.complete(18000, config, true);
+    expect(s.nextRetryAt).toBe(400000);
+    expect(s.take(399999, config)).toBeUndefined();
+    expect(s.take(400000, config)?.workspace_id).toBe('a');
+    s.serviceSuccess();
+    s.complete(401000, config, false);
+    expect(s.take(401001, config)).toBeUndefined();
+    expect(s.take(401000 + pollSeconds * 1000, config)?.workspace_id).toBe('a');
+  });
+}
+
+test('transient retries retain FIFO fairness and the capped deadline through completion', () => {
+  const s = new Scheduler(() => 0);
+  const config = { ...defaults, pollSeconds: 3600, activePollSeconds: 3600 };
+  s.reconcile([a, b]);
+  expect(s.take(0, config)?.workspace_id).toBe('a');
+  s.serviceFailure(0); s.complete(1, config, true);
+  expect(s.take(15000, config)?.workspace_id).toBe('b');
+  expect(s.take(15000, config)).toBeUndefined();
+  s.serviceSuccess(); s.complete(15001, config, false);
+  expect(s.take(15001, config)?.workspace_id).toBe('a');
+  let now = 15001;
+  for (const deadline of [30001, 60001, 120001, 240001, 390001, 540001]) {
+    s.serviceFailure(now); s.complete(now + 1, config, true);
+    expect(s.nextRetryAt).toBe(deadline);
+    expect(s.take(deadline - 1, config)).toBeUndefined();
+    expect(s.take(deadline, config)?.workspace_id).toBe('a');
+    now = deadline;
+  }
+});

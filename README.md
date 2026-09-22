@@ -79,19 +79,12 @@ each running session that should poll. Do not kill or restart the Herdr server.
 
 ## Polling
 
-Background workspaces use `pollSeconds` (**60 seconds** by default); the active workspace uses `activePollSeconds` (**30 seconds** by default). Both are integers from **15 to 3600**, measured after each workspace refresh completes. Refreshes never overlap. Local branch checks run every 2 seconds for the active workspace and on both sides of a focus change; unchanged branches do not trigger extra GitHub requests.
+PR status refreshes automatically: every **30 seconds** for the active workspace
+and **60 seconds** for background workspaces by default. Configure these with
+`activePollSeconds` and `pollSeconds` (15–3600 seconds).
 
-Polling uses a one-shot Herdr startup hook to launch a session-scoped worker. Installing, linking or enabling a plugin does not run startup hooks, so an already-running Herdr session needs the start action once. Future Herdr starts run the hook automatically. Manual refresh remains available.
-
-- `start`: idempotently start the worker and refresh immediately.
-- `status`: report running/waiting state, refresh count (`cycles`), and last success/error. Read the action log to see the result.
-- `stop`: request shutdown; a bounded in-flight subprocess may finish, but no new metadata reports are started after stop is observed. Existing badges are left in place. Stopping is session-local; a future server startup starts polling again. Disable the plugin to prevent startup.
-
-The worker watches the Herdr socket and checks plugin enablement periodically (about every five seconds) and before publishing. Disabling/unlinking the plugin or ending its Herdr session stops the worker. A later enable/relink requires the start action again. No Herdr server restart is needed.
-
-Use Herdr actions for refresh/start/stop/status: they supply the config/state/socket environment. Use the `preview` action for read-only diagnostics. Each session uses separate state under `HERDR_PLUGIN_STATE_DIR`, with bounded status/error data and a token-authenticated localhost control endpoint. Kernel file locks via Bun FFI prevent duplicate workers and serialize manual/polling refreshes, and release automatically on crashes. Locks require macOS or Linux libc and Bun FFI support. A manual refresh waits up to 30 seconds for an active refresh, then fails with a busy diagnostic rather than overlapping. Crashed workers do not auto-respawn; use start or the next Herdr startup.
-
-GitHub/authentication failures are retried after the workspace’s polling interval without clearing prior metadata. Config changes are picked up during local observation (normally every 2 seconds). Per-workspace errors do not prevent other workspaces from updating. Polling makes read-only GitHub requests for each eligible workspace; a longer interval reduces API usage.
+Use the Herdr plugin actions to `start`, `stop`, or manually `refresh`.
+Use `status` or `preview` for diagnostics; results appear in the action log.
 
 ## Formatting
 

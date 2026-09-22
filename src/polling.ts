@@ -10,6 +10,7 @@ import { refresh, StaleCheckoutError, type RefreshState, type RefreshResult, typ
 import { serialized, tryLock } from './locking';
 
 import { Scheduler } from './scheduler';
+import { retryRefresh } from './refresh-retry';
 import { localIdentity, observedCheckout, workspaceLoop } from './workspace-loop';
 import { subscribe } from './subscription';
 import { sanitize } from './feedback';
@@ -147,10 +148,10 @@ export async function start(s: Session): Promise<Record<string, unknown>> {
     throw new Error('Poller did not become ready; check status and verify Bun FFI is available');
   });
 }
-export async function manualRefresh(s: Session, config: Config, memory?: RefreshState, preview = false): Promise<RefreshResult[]> {
+export async function manualRefresh(s: Session, config: Config, memory?: RefreshState, preview = false, scheduler = new Scheduler()): Promise<RefreshResult[]> {
   if (!memory && (await status(s)).running) {
     const response = await control(s, preview ? 'preview' : 'refresh');
-    if (!Array.isArray(response.results)) throw new Error('Live refresh failed; inspect status and retry');
+    if (!Array.isArray(response.results)) throw new Error(typeof response.error === 'string' ? sanitize(response.error) : 'Live refresh failed; inspect status and retry');
     return response.results as RefreshResult[];
   }
   return serialized(join(s.dir, 'refresh.lock'), async () => {
@@ -167,7 +168,7 @@ export async function manualRefresh(s: Session, config: Config, memory?: Refresh
       await validate();
       return runCommand(args);
     });
-    return refresh(config, preview, guarded, undefined, memory, publish);
+    return retryRefresh(scheduler, run => refresh(config, preview, run, undefined, memory, publish), guarded, true);
   });
 }
 export async function previewRefresh(config: Config): Promise<RefreshResult[]> {
@@ -181,7 +182,7 @@ class RefreshFailed extends Error {}
 
 export interface CycleState {
   running: boolean; state: string; cycles: number; startedAt: string;
-  lastSuccessAt?: string; lastErrorAt?: string; lastError?: string; nextRunAt?: string;
+  lastSuccessAt?: string; lastErrorAt?: string; lastError?: string; nextRunAt?: string; nextRetryAt?: string;
   workspaces?: Omit<RefreshResult, 'tokens'>[];
 }
 export interface LoopOptions {
@@ -241,23 +242,28 @@ export async function worker(s: Session): Promise<void> {
     } else delete state.lastError;
     if (results.some(result => result.freshness === 'fresh')) state.lastSuccessAt = new Date().toISOString();
   };
-  const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(statusSnapshot(state)), { mode: 0o600 }); };
+  const save = async () => {
+    state.nextRetryAt = scheduler.nextRetryAt > Date.now() ? new Date(scheduler.nextRetryAt).toISOString() : undefined;
+    await writeFile(join(s.dir, 'status.json'), JSON.stringify(statusSnapshot(state)), { mode: 0o600 }); };
   const stop = () => { active = false; state.state = 'stopping'; wake(); };
   const token = randomUUID();
   const server = createServer(client => {
     client.on('error', () => client.destroy());
     client.setTimeout(2000, () => client.destroy());
     let request = '';
+    let handled = false;
     client.on('data', data => {
       request += data.toString();
       if (request.length > 128) { client.destroy(); return; }
       if (!request.includes('\n')) return;
       const [secret, cmd] = request.trim().split(' ');
       if (secret !== token) { client.destroy(); return; }
+      if (handled) return;
+      handled = true;
       if (cmd === 'stop') stop();
       if (cmd === 'refresh' || cmd === 'preview') {
         client.setTimeout(120000);
-        void loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview')).then(async results => {
+        void loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview', scheduler)).then(async results => {
           if (cmd === 'refresh') {
             recordResults(results);
             for (const result of results) if (result.stale) scheduler.requeue(result.workspace);
@@ -265,7 +271,7 @@ export async function worker(s: Session): Promise<void> {
             await save();
           }
           client.end(controlResponse({ results }));
-        }).catch(error => client.end(controlResponse({ error: message(error) })));
+        }).catch(error => client.end(controlResponse({ error: message(error) }))).finally(() => save().catch(() => {}));
         return;
       }
       client.end(controlResponse(cmd === 'stop' || cmd === 'status' ? statusSnapshot(state) : { error: 'Unknown command' }));
@@ -376,7 +382,7 @@ export async function worker(s: Session): Promise<void> {
           await validate();
           return runCommand(args);
         });
-        const results = await refresh(config, false, guarded, [entry.workspace], memory, publish);
+        const results = await retryRefresh(scheduler, run => refresh(config, false, run, [entry.workspace], memory, publish), guarded);
         recordResults(results);
         if (results.some(result => result.stale)) {
           // An unfocused checkout has no periodic local observer. Requeue even
