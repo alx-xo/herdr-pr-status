@@ -23,8 +23,15 @@ export interface RefreshResult {
 export type RefreshState = Map<string, { context: string; cwd: string; branch: string; pr: PRStatus | null; lastSuccessAt: string }>;
 export class StaleCheckoutError extends Error {}
 
+/** Runtime publishers must validate after their asynchronous permission checks. */
+export type Publisher = (id: string, tokens: Tokens, validate: () => Promise<void>) => Promise<void>;
+
 /** Sequential workspaces bound gh traffic; one bad checkout does not block others. */
-export async function refresh(config: Config, preview: boolean, run: Runner = runCommand, targets?: Workspace[], state: RefreshState = new Map()): Promise<RefreshResult[]> {
+export async function refresh(config: Config, preview: boolean, run: Runner = runCommand, targets?: Workspace[], state: RefreshState = new Map(), publisher?: Publisher): Promise<RefreshResult[]> {
+  const publish: Publisher = publisher ?? (async (id, tokens, validate) => {
+    await validate();
+    await publishTokens(id, tokens, run);
+  });
   const results: RefreshResult[] = [];
   for (const workspace of targets ?? await listWorkspaces(run)) {
     const id = workspace.workspace_id;
@@ -42,7 +49,7 @@ export async function refresh(config: Config, preview: boolean, run: Runner = ru
       branch = resolved.branch;
       context = JSON.stringify([cwd, resolved]);
       if (!preview && state.get(id)?.context !== context) {
-        await publishTokens(id, formatPR(null, config), run);
+        await publish(id, formatPR(null, config), async () => {});
         state.delete(id);
       }
       pr = await lookupPR(cwd, run, resolved);
@@ -63,24 +70,29 @@ export async function refresh(config: Config, preview: boolean, run: Runner = ru
       lastSuccessAt: problem ? previous?.lastSuccessAt : refreshedAt,
       ...(problem ? { category: problem.category, reason: problem.reason, action: problem.action } : {}) };
     try {
-      // Recheck both branch and push destination, including on failed network calls.
-      if (cwd && context !== undefined) {
-        let current: string;
-        try { current = JSON.stringify([cwd, await resolveContext(cwd, run)]); }
-        catch { throw new StaleCheckoutError(); }
-        if (current !== context) throw new StaleCheckoutError();
-      }
+      // The runtime invokes this after enablement/session waits, just before spawn.
+      const validate = async () => {
+        if (cwd && context !== undefined) {
+          let current: string;
+          try {
+            const checkout = await discoverCheckout(workspace, run);
+            current = JSON.stringify([checkout.cwd, await resolveContext(cwd, run)]);
+          }
+          catch { throw new StaleCheckoutError(); }
+          if (current !== context) throw new StaleCheckoutError();
+        }
+      };
       if (!preview) {
-        await publishTokens(id, tokens, run);
+        await publish(id, tokens, validate);
         if (!problem) state.set(id, { context: context!, cwd: cwd!, branch: branch!, pr, lastSuccessAt: refreshedAt });
         else if (!previous) state.delete(id);
-      }
+      } else await validate();
       results.push(result);
     } catch (error) {
       if (error instanceof StaleCheckoutError) {
         if (!preview) {
           state.delete(id);
-          try { await publishTokens(id, formatPR(null, config), run); } catch { /* publication may no longer be allowed */ }
+          try { await publish(id, formatPR(null, config), async () => {}); } catch { /* publication may no longer be allowed */ }
         }
         results.push({ ...base, status: 'skipped', stale: true, reason: 'Checkout changed; retry on next refresh' });
       } else {

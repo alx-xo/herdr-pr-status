@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { defaults, formatPR, parseConfig, type Config } from './format';
 import { herdrBin, listWorkspaces, publishTokens } from './herdr';
 import { runCommand, type Runner } from './process';
-import { refresh, StaleCheckoutError, type RefreshState, type RefreshResult } from './refresh';
+import { refresh, StaleCheckoutError, type RefreshState, type RefreshResult, type Publisher } from './refresh';
 import { serialized, tryLock } from './locking';
 
 import { Scheduler } from './scheduler';
@@ -54,24 +54,58 @@ export async function enabled(run: Runner = runCommand): Promise<boolean> {
   return data.result.plugins.some((plugin: { plugin_id: string; enabled: boolean }) => plugin.plugin_id === id && plugin.enabled === true);
 }
 
+// Whole refresh/preview results are returned or explicitly rejected, never silently cut.
+const controlResponseLimit = 256 * 1024;
+class ControlResponseError extends Error {}
+function controlResponse(value: Record<string, unknown>): string {
+  const json = JSON.stringify(value);
+  return Buffer.byteLength(json) <= controlResponseLimit ? json : JSON.stringify({
+    code: 'RESPONSE_TOO_LARGE',
+    error: 'Poller response exceeds the 256 KiB limit. Reduce workspace count or shorten labels and retry; status shows bounded diagnostics.',
+  });
+}
+
+/** Status snapshots prioritize failures, bound user-controlled strings, and declare omissions. */
+function statusSnapshot(state: CycleState) {
+  const bounded = (value: string, size: number) => sanitize(value.slice(0, size)).slice(0, size);
+  const results = state.workspaces ?? [];
+  const ordered = [...results.filter(result => result.status === 'error'), ...results.filter(result => result.status !== 'error')];
+  return { ...state, workspaces: ordered.slice(0, 100).map(result => ({ ...result,
+    workspace: bounded(result.workspace, 128), label: bounded(result.label, 128),
+    cwd: result.cwd === undefined ? undefined : bounded(result.cwd, 512),
+    reason: result.reason === undefined ? undefined : bounded(result.reason, 512),
+    action: result.action === undefined ? undefined : bounded(result.action, 512),
+  })), omittedWorkspaces: Math.max(0, results.length - 100) };
+}
+
 export async function control(s: Session, command: 'status' | 'stop' | 'refresh' | 'preview'): Promise<Record<string, unknown>> {
   const endpoint = JSON.parse(await readFile(s.control, 'utf8'));
   if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535 || typeof endpoint.token !== 'string') throw new Error('Invalid poller endpoint');
   return new Promise((resolve, reject) => {
     const client = createConnection({ host: '127.0.0.1', port: endpoint.port });
-    let text = '';
+    const chunks: Buffer[] = [];
+    let bytes = 0;
     client.setTimeout(command === 'refresh' || command === 'preview' ? 120000 : 2000, () => client.destroy(new Error('Poller control timed out')));
     client.on('connect', () => client.write(`${endpoint.token} ${command}\n`));
     client.on('error', reject);
     client.on('data', data => {
-      text += data.toString();
-      if (text.length > 8192) client.destroy(new Error('Invalid poller response'));
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      bytes += chunk.length;
+      if (bytes > controlResponseLimit) { client.destroy(new ControlResponseError('Poller response exceeds the 256 KiB limit; reduce workspace count or shorten labels and retry')); return; }
+      chunks.push(chunk);
     });
-    client.on('end', () => { try { resolve(JSON.parse(text)); } catch (error) { reject(error); } });
+    client.on('end', () => {
+      try {
+        const response = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (response.code === 'RESPONSE_TOO_LARGE') throw new ControlResponseError(response.error);
+        resolve(response);
+      } catch (error) { reject(error); }
+    });
   });
 }
 export async function status(s: Session): Promise<Record<string, unknown>> {
-  try { return await control(s, 'status'); } catch {
+  try { return await control(s, 'status'); } catch (error) {
+    if (error instanceof ControlResponseError) throw error;
     const release = tryLock(join(s.dir, 'worker.lock'));
     if (!release) return { running: true, state: 'starting or stopping', session: s.identity };
     release();
@@ -127,7 +161,13 @@ export async function manualRefresh(s: Session, config: Config, memory?: Refresh
       if (!await sameSession(s)) throw new Error('Herdr session ended');
       return runCommand(args, cwd);
     };
-    return refresh(config, preview, guarded, undefined, memory);
+    const publish: Publisher = (id, tokens, validate) => publishTokens(id, tokens, async args => {
+      if (!await sameSession(s) || !await enabled()) throw new Error('Herdr session ended or plugin is disabled/unlinked');
+      if (!await sameSession(s)) throw new Error('Herdr session ended');
+      await validate();
+      return runCommand(args);
+    });
+    return refresh(config, preview, guarded, undefined, memory, publish);
   });
 }
 export async function previewRefresh(config: Config): Promise<RefreshResult[]> {
@@ -196,12 +236,12 @@ export async function worker(s: Session): Promise<void> {
     state.workspaces = [...diagnostics.values()];
     const errors = state.workspaces.filter(result => result.status === 'error');
     if (errors.length) {
-      state.lastError = errors.map(result => `${result.reason} ${result.action}`).join('; ');
+      state.lastError = sanitize(`${errors.length} workspace refresh(es) failed. ${errors[0]!.reason} ${errors[0]!.action} See workspace diagnostics.`);
       state.lastErrorAt = new Date().toISOString();
     } else delete state.lastError;
     if (results.some(result => result.freshness === 'fresh')) state.lastSuccessAt = new Date().toISOString();
   };
-  const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(state), { mode: 0o600 }); };
+  const save = async () => { await writeFile(join(s.dir, 'status.json'), JSON.stringify(statusSnapshot(state)), { mode: 0o600 }); };
   const stop = () => { active = false; state.state = 'stopping'; wake(); };
   const token = randomUUID();
   const server = createServer(client => {
@@ -218,12 +258,17 @@ export async function worker(s: Session): Promise<void> {
       if (cmd === 'refresh' || cmd === 'preview') {
         client.setTimeout(120000);
         void loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview')).then(async results => {
-          if (cmd === 'refresh') { recordResults(results); await save(); }
-          client.end(JSON.stringify({ results }));
-        }).catch(error => client.end(JSON.stringify({ error: message(error) })));
+          if (cmd === 'refresh') {
+            recordResults(results);
+            for (const result of results) if (result.stale) scheduler.requeue(result.workspace);
+            if (results.some(result => result.stale)) { signaled = true; wake(); }
+            await save();
+          }
+          client.end(controlResponse({ results }));
+        }).catch(error => client.end(controlResponse({ error: message(error) })));
         return;
       }
-      client.end(JSON.stringify(cmd === 'stop' || cmd === 'status' ? state : { error: 'Unknown command' }));
+      client.end(controlResponse(cmd === 'stop' || cmd === 'status' ? statusSnapshot(state) : { error: 'Unknown command' }));
     });
   });
   let watching = false;
@@ -321,17 +366,17 @@ export async function worker(s: Session): Promise<void> {
         if (!scheduler.consume(workspace.workspace_id, before)) return;
         const version = entry.version;
         state.state = 'refreshing'; delete state.nextRunAt;
-        const publishGuard: Runner = async (args, cwd) => {
-          if (!args.includes('report-metadata')) return guarded(args, cwd);
+        const publish: Publisher = (id, tokens, validate) => publishTokens(id, tokens, async args => {
           await checkCommand(args);
           // Validate after enablement/session waits, with no further await before spawn.
           const current = await localIdentity(entry.workspace, guarded);
           scheduler.observe(workspace.workspace_id, current);
           if (!active) throw new Error('Poller stopped');
           if (scheduler.entries.get(workspace.workspace_id) !== entry || ((entry.version !== version || current !== before) && args.includes('--token'))) throw new StaleCheckoutError('Checkout changed during lookup; retry on next refresh');
-          return runCommand(args, cwd);
-        };
-        const results = await refresh(config, false, publishGuard, [entry.workspace], memory);
+          await validate();
+          return runCommand(args);
+        });
+        const results = await refresh(config, false, guarded, [entry.workspace], memory, publish);
         recordResults(results);
         if (results.some(result => result.stale)) {
           // An unfocused checkout has no periodic local observer. Requeue even

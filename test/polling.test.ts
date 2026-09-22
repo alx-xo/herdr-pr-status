@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer, type Socket } from 'node:net';
 import { defaults } from '../src/format';
-import { enabled, pollLoop, type CycleState } from '../src/polling';
+import { control, status, enabled, pollLoop, type CycleState, type Session } from '../src/polling';
 import { serialized, tryLock } from '../src/locking';
 
 const entry = new URL('../src/main.ts', import.meta.url).pathname;
@@ -234,12 +234,12 @@ const json=value=>console.log(JSON.stringify(value));
 const gate=async name=>{log('gate',name);while(!existsSync(dir+'/'+name)) await Bun.sleep(10);};
 if(tool==='herdr') {
   if(args[0]==='plugin') {
-    if(${JSON.stringify(scenario)}==='publication' && existsSync(dir+'/lookup-complete')) await gate('release-publication');
+    if((${JSON.stringify(scenario)}==='publication' || existsSync(dir+'/gate-publication')) && existsSync(dir+'/lookup-complete')) await gate('release-publication');
     json({result:{plugins:[{plugin_id:'alx-xo.pr-status',enabled:true}]}});
   }
   else if(args[0]==='workspace' && args[1]==='list') {
     if(existsSync(dir+'/observed-new')) log('observed','new');
-    json({result:{workspaces:[{workspace_id:'w1',label:'repo',focused:false,worktree:{checkout_path:repo}}]}});
+    json({result:{workspaces:Array.from({length:existsSync(dir+'/workspace-count')?Number(readFileSync(dir+'/workspace-count','utf8')):1},(_,i)=>({workspace_id:'w'+(i+1),label:existsSync(dir+'/workspace-label')?readFileSync(dir+'/workspace-label','utf8'):'repo',focused:false,worktree:{checkout_path:repo}}))}});
   } else if(args[1]==='report-metadata') {
     const tokens={};
     for(let i=0;i<args.length;i++) {
@@ -251,7 +251,7 @@ if(tool==='herdr') {
   else throw Error('Unexpected Herdr '+args);
 } else if(tool==='git') {
   if(args[0]==='rev-parse') console.log(args[1]==='--absolute-git-dir'?repo+'/.git':repo);
-  else if(args[0]==='remote') console.log(args[1]==='get-url'?'https://github.com/test/repo':'origin');
+  else if(args[0]==='remote') console.log(args[1]==='get-url'?(existsSync(dir+'/push-url')?readFileSync(dir+'/push-url','utf8'):'https://github.com/test/repo'):'origin');
   else if(args[0]==='for-each-ref' || args[0]==='config') console.log('');
   else if(args[0]==='branch') {
     const value=branch();
@@ -422,3 +422,82 @@ test('local observation retains a newer successful manual refresh after switchin
     expect(current.lastError).toContain('retry after any rate limit reset');
   } finally { await f.cleanup(); }
 }, 15000);
+
+
+test('manual refresh validates checkout after publication enablement and requeues live work', async () => {
+  for (const { live, repositoryChange } of [{ live: false, repositoryChange: false }, { live: true, repositoryChange: false }, { live: false, repositoryChange: true }]) {
+    const f = await checkoutFixture('lock');
+    try {
+      if (live) {
+        await f.cli('start');
+        await f.until(async () => (await f.cli('status')).cycles >= 1);
+      }
+      await rm(join(f.dir, 'lookup-complete'), { force: true });
+      await f.release('gate-publication');
+      const prior = (await f.published()).length;
+      const child = Bun.spawn([process.execPath, 'src/main.ts', 'refresh'], { cwd: process.cwd(), env: f.env, stdout: 'pipe', stderr: 'pipe' });
+      await f.until(async () => (await f.events('gate')).includes('release-publication'));
+      if (repositoryChange) await writeFile(join(f.dir, 'push-url'), 'https://github.com/other/repo');
+      else await writeFile(join(f.dir, 'branch'), 'new');
+      await f.release('release-publication');
+      const results = JSON.parse(await new Response(child.stdout).text());
+      await child.exited;
+      expect(results[0]).toMatchObject({ status: 'skipped', stale: true });
+      expect((await f.published()).slice(prior)).not.toContainEqual(publication(101));
+      expect((await f.published()).slice(prior).some(item => Object.values(item.tokens).every(value => value === ''))).toBe(true);
+      if (live) await f.until(async () => (await f.published()).some(item => item.tokens.pr === publication(202).tokens.pr));
+    } finally { await f.release('release-publication'); await f.cleanup(); }
+  }
+}, 15000);
+
+
+test('multi-workspace failures survive status, refresh and preview control transport', async () => {
+  const f = await checkoutFixture('lock');
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles >= 1);
+    await writeFile(join(f.dir, 'workspace-count'), '20');
+    await writeFile(join(f.dir, 'gh'), `#!${process.execPath}\nconsole.error('HTTP 401: Bad credentials');process.exit(1);\n`, { mode: 0o700 });
+    for (const command of ['refresh', 'preview']) {
+      const child = Bun.spawn([process.execPath, entry, command], { env: f.env, stdout: 'pipe', stderr: 'pipe' });
+      const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      expect(err).toBe('');
+      expect(code).toBe(1);
+      expect(JSON.parse(out)).toHaveLength(20);
+    }
+    const current = await f.cli('status');
+    expect(current.state).not.toBe('starting or stopping');
+    expect(current.workspaces).toHaveLength(20);
+    expect(current.workspaces.every((result: { category: string }) => result.category === 'authentication')).toBe(true);
+    expect(current.lastError.length).toBeLessThanOrEqual(1000);
+    await writeFile(join(f.dir, 'workspace-label'), 'x'.repeat(20000));
+    const oversized = Bun.spawn([process.execPath, entry, 'refresh'], { env: f.env, stdout: 'pipe', stderr: 'pipe' });
+    const [out, err, code] = await Promise.all([new Response(oversized.stdout).text(), new Response(oversized.stderr).text(), oversized.exited]);
+    expect(code).toBe(1);
+    expect(out).toBe('');
+    expect(err).toContain('256 KiB limit');
+    const bounded = await f.cli('status');
+    expect(bounded.workspaces).toHaveLength(20);
+    expect(bounded.workspaces.every((result: { label: string }) => result.label.length <= 128)).toBe(true);
+  } finally { await f.cleanup(); }
+}, 30000);
+
+
+test('oversized control responses report an explicit limit, not a startup state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pr-control-limit-'));
+  const server = createServer(client => {
+    client.on('error', () => {});
+    client.once('data', () => client.end(JSON.stringify({ workspaces: ['x'.repeat(256 * 1024)] })));
+  });
+  let release: (() => void) | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Missing TCP address');
+    const s: Session = { dir, socket: '', identity: 'test', control: join(dir, 'control.json') };
+    await writeFile(s.control, JSON.stringify({ port: address.port, token: 'test' }));
+    release = tryLock(join(dir, 'worker.lock'));
+    await expect(control(s, 'preview')).rejects.toThrow('256 KiB limit');
+    await expect(status(s)).rejects.toThrow('256 KiB limit');
+  } finally { release?.(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
+});
