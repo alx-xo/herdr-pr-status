@@ -11,6 +11,25 @@ interface Entry {
 }
 /** FIFO pending work, completion-relative deadlines, and versioned local observations. */
 export class Scheduler {
+  private serviceFailures = 0;
+  private serviceRetryAt = 0;
+  private rateLimitUntil = 0;
+  constructor(private readonly random: () => number = Math.random) {}
+  get nextRetryAt(): number { return Math.max(this.serviceRetryAt, this.rateLimitUntil); }
+  canRefresh(now: number, manual = false): boolean {
+    return now >= this.rateLimitUntil && (manual || now >= this.serviceRetryAt);
+  }
+  serviceFailure(now: number, knownRetryAt?: number) {
+    // Equal jitter: 15–30s initially, doubling to a 150–300s ceiling.
+    const ceiling = Math.min(300000, 30000 * 2 ** Math.min(this.serviceFailures++, 4));
+    this.serviceRetryAt = now + Math.floor(ceiling * (0.5 + this.random() / 2));
+    if (knownRetryAt !== undefined) this.rateLimitUntil = Math.max(this.rateLimitUntil, knownRetryAt);
+  }
+  serviceSuccess() {
+    this.serviceFailures = 0;
+    this.serviceRetryAt = 0;
+    // Successful work cannot erase a still-known cooldown.
+  }
   readonly entries = new Map<string, Entry>();
   focused?: string;
   focusVersion = 0;
@@ -56,7 +75,7 @@ export class Scheduler {
     return (id === this.focused ? config.activePollSeconds : config.pollSeconds) * 1000;
   }
   take(now: number, config: Config): Workspace | undefined {
-    if (this.flight) return;
+    if (this.flight || !this.canRefresh(now)) return;
     for (const [id, entry] of this.entries) {
       if (now < entry.retryAt) continue;
       if (!entry.pending && entry.completed !== undefined && now < entry.completed + this.interval(id, config)) continue;

@@ -194,3 +194,37 @@ test('consumption resets preflight changes but retains observations after lookup
   s.observe('a', 'during'); s.complete(6000, defaults, false);
   expect(s.take(6000, defaults)?.workspace_id).toBe('a');
 });
+
+test('service backoff is shared, jittered, capped and manual only bypasses unknown timing', () => {
+  const s = new Scheduler(() => 0);
+  s.reconcile([a, b]);
+  s.serviceFailure(1000);
+  expect(s.nextRetryAt).toBe(16000);
+  expect(s.take(15999, defaults)).toBeUndefined();
+  expect(s.canRefresh(1001, true)).toBe(true);
+  s.serviceFailure(16000, 100000);
+  expect(s.nextRetryAt).toBe(100000);
+  expect(s.canRefresh(99999, true)).toBe(false);
+  expect(s.canRefresh(100000, true)).toBe(true);
+  s.serviceSuccess();
+  s.serviceFailure(100000);
+  expect(s.nextRetryAt).toBe(115000);
+  for (let i = 0; i < 20; i++) s.serviceFailure(100000);
+  expect(s.nextRetryAt).toBe(250000);
+  const upper = new Scheduler(() => 1);
+  for (let i = 0; i < 20; i++) upper.serviceFailure(0);
+  expect(upper.nextRetryAt).toBe(300000);
+});
+
+test('sleep recovery coalesces missed polls and completing work still schedules from completion', () => {
+  const s = ready();
+  const resumed = 86400000;
+  expect(s.take(resumed, defaults)?.workspace_id).toBe('a');
+  expect(s.take(resumed, defaults)).toBeUndefined();
+  s.complete(resumed + 100, defaults, false);
+  expect(s.take(resumed + 100, defaults)?.workspace_id).toBe('b');
+  s.complete(resumed + 200, defaults, false);
+  expect(s.take(resumed + 200, defaults)).toBeUndefined();
+  expect(s.take(resumed + 30099, defaults)).toBeUndefined();
+  expect(s.take(resumed + 30100, defaults)?.workspace_id).toBe('a');
+});

@@ -261,9 +261,15 @@ if(tool==='herdr') {
     console.log(value);
   } else throw Error('Unexpected Git '+args);
 } else if(tool==='gh') {
+  log('gh',args);
+  if(existsSync(dir+'/gh-error')) {console.error(readFileSync(dir+'/gh-error','utf8'));process.exit(1);}
   if(args[0]==='repo') json({nameWithOwner:'test/repo',url:'https://github.com/test/repo',parent:null});
   else if(args[0]==='pr' && args[1]==='list') {
     const head=args[args.indexOf('--head')+1];log('lookup',head);
+    if(existsSync(dir+'/gate-requests')) {
+      const count=existsSync(dir+'/request-count')?Number(readFileSync(dir+'/request-count','utf8'))+1:1;
+      writeFileSync(dir+'/request-count',String(count));await gate('release-request-'+count);
+    }
     if(existsSync(dir+'/gate-new') && head==='new') await gate('release-new');
     if(${JSON.stringify(scenario)}!=='lock' && head==='old') await gate('release-lookup');
     const number={old:101,new:202,latest:303}[head];
@@ -501,3 +507,119 @@ test('oversized control responses report an explicit limit, not a startup state'
     await expect(status(s)).rejects.toThrow('256 KiB limit');
   } finally { release?.(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('background, manual and preview refreshes share one runtime lease', async () => {
+  const f = await checkoutFixture('lock');
+  const pending: Promise<unknown>[] = [];
+  try {
+    await f.release('gate-requests');
+    await f.cli('start');
+    await f.until(async () => (await f.events('gate')).includes('release-request-1'));
+    let completed = 0;
+    for (const command of ['refresh', 'preview']) {
+      pending.push(f.cli(command).then(result => { completed++; return result; }));
+    }
+    const initialCalls = (await f.events('gh')).length;
+    await Bun.sleep(250);
+    expect(completed).toBe(0);
+    expect((await f.events('gh')).length).toBe(initialCalls);
+    expect(await f.events('lookup')).toEqual(['old']);
+    await f.release('release-request-1');
+    await f.until(async () => (await f.events('gate')).includes('release-request-2'));
+    const secondCalls = (await f.events('gh')).length;
+    await Bun.sleep(250);
+    expect(completed).toBe(0);
+    expect((await f.events('gh')).length).toBe(secondCalls);
+    expect(await f.events('lookup')).toEqual(['old', 'old']);
+    await f.release('release-request-2');
+    await f.until(async () => (await f.events('gate')).includes('release-request-3'));
+    expect(completed).toBe(1);
+    await f.release('release-request-3');
+    const results = await Promise.all(pending);
+    for (const result of results) expect(result).toMatchObject([{ freshness: 'fresh', tokens: publication(101).tokens }]);
+    expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean)))
+      .toEqual([publication(101), publication(101)]);
+  } finally {
+    for (let i = 1; i <= 3; i++) await f.release(`release-request-${i}`);
+    await Promise.allSettled(pending);
+    await f.cleanup();
+  }
+}, 15000);
+
+
+test('manual refresh retries a background service failure before its backoff expires', async () => {
+  const f = await checkoutFixture('lock');
+  try {
+    await writeFile(join(f.dir, 'gh-error'), 'HTTP 503 Service Unavailable');
+    await f.cli('start');
+    await f.until(async () => Boolean((await f.cli('status')).nextRetryAt));
+    const failed = await f.cli('status');
+    expect(failed.workspaces[0].category).toBe('service');
+    expect(Date.parse(failed.nextRetryAt)).toBeGreaterThan(Date.now());
+    const calls = (await f.events('gh')).length;
+    await rm(join(f.dir, 'gh-error'));
+    const result = await f.cli('refresh');
+    expect(Date.now()).toBeLessThan(Date.parse(failed.nextRetryAt));
+    expect(result).toMatchObject([{ freshness: 'fresh', tokens: publication(101).tokens }]);
+    expect((await f.events('gh')).length).toBeGreaterThan(calls);
+    const recovered = await f.cli('status');
+    expect(recovered.nextRetryAt).toBeUndefined();
+    expect(recovered.workspaces[0].freshness).toBe('fresh');
+  } finally { await f.cleanup(); }
+}, 15000);
+
+test('background and manual Retry-After failures block refresh and preview without erasing diagnostics', async () => {
+  for (const origin of ['background', 'refresh', 'preview'] as const) {
+    const f = await checkoutFixture('lock');
+    try {
+      if (origin !== 'background') {
+        await f.cli('start');
+        await f.until(async () => (await f.cli('status')).cycles >= 1);
+      }
+      const before = Date.now();
+      // Rate-limit classification needs rate text; only the explicit header supplies a cooldown.
+      await writeFile(join(f.dir, 'gh-error'), 'HTTP 429 API rate limit exceeded\nRetry-After: 120');
+      if (origin === 'background') await f.cli('start');
+      else await expect(f.cli(origin)).rejects.toThrow();
+      await f.until(async () => Boolean((await f.cli('status')).nextRetryAt));
+      const failed = await f.cli('status');
+      expect(Date.parse(failed.nextRetryAt)).toBeGreaterThanOrEqual(before + 120000);
+      const calls = (await f.events('gh')).length;
+      const publications = await f.published();
+      await rm(join(f.dir, 'gh-error'));
+      for (const command of ['refresh', 'preview']) {
+        await expect(f.cli(command)).rejects.toThrow('Refresh deferred; retry at');
+        const deferred = await f.cli('status');
+        expect(deferred.nextRetryAt).toBe(failed.nextRetryAt);
+        expect(deferred.workspaces).toEqual(failed.workspaces);
+        expect(deferred.lastError).toBe(failed.lastError);
+      }
+      expect((await f.events('gh')).length).toBe(calls);
+      expect(await f.published()).toEqual(publications);
+    } finally { await f.cleanup(); }
+  }
+}, 20000);
+
+test('a timed-out gh subprocess releases the runtime lease for manual recovery', async () => {
+  const f = await checkoutFixture('lock');
+  try {
+    await f.release('gate-requests');
+    await f.cli('start');
+    await f.until(async () => (await f.events('gate')).includes('release-request-1'));
+    // Exercise the real command deadline, not a fake exit that merely says "timeout".
+    await f.until(async () => (await f.cli('status')).workspaces?.[0]?.category === 'service', 35000);
+    const failed = await f.cli('status');
+    expect(failed.running).toBe(true);
+    expect(failed.nextRetryAt).toBeDefined();
+    expect(await f.events('lookup')).toEqual(['old']);
+    await rm(join(f.dir, 'gate-requests'));
+    const result = await f.cli('refresh');
+    expect(result).toMatchObject([{ freshness: 'fresh', tokens: publication(101).tokens }]);
+    expect(await f.events('lookup')).toEqual(['old', 'old']);
+    expect((await f.cli('status')).nextRetryAt).toBeUndefined();
+  } finally {
+    await f.release('release-request-1');
+    await f.cleanup();
+  }
+}, 45000);
