@@ -27,6 +27,17 @@ function fixture(options: {
     if (options.fail === "git" && args[0] === "git") throw new Error("git failure");
     if (command === "git branch --show-current") return options.branch ?? "local-feature\n";
     if (args[1] === "for-each-ref") return options.tracking ?? "fork\trefs/heads/remote-feature\torigin\trefs/heads/wrong\n";
+    if (command === "git config --null") {
+      const [push, pushRef, upstream, upstreamRef] = (options.tracking ?? "fork\trefs/heads/remote-feature\torigin\trefs/heads/wrong").trimEnd().split("\t");
+      const values: Record<string, string> = {};
+      if (push) values["branch.local-feature.pushremote"] = push;
+      if (pushRef) values[`remote.${push}.push`] = `refs/heads/local-feature:${pushRef}`;
+      if (upstream) values["branch.local-feature.remote"] = upstream;
+      if (upstreamRef) values["branch.local-feature.merge"] = upstreamRef;
+      if (!push && upstream) values["push.default"] = "upstream";
+      return Object.entries(values).map(([key, value]) => `${key}\n${value}\0`).join("");
+    }
+    if (args[0] === "git" && args[1] === "remote" && args.length === 2) return "origin\n";
     if (command === "git remote get-url") {
       if (!args.includes("--push") && options.fetchRemote) return options.fetchRemote;
       return options.remote ?? "git@github.com:Alice/Project.git\n";
@@ -84,20 +95,20 @@ describe("branch PR identity", () => {
   test("uses push remote and remote branch, rejecting same-named branch on another fork", async () => {
     const { run, calls } = fixture({ prs: [pr({ number: 99, headRepositoryOwner: { login: "bob" } }), pr()] });
     expect((await lookupPR(cwd, run))?.number).toBe(42);
-    expect(calls).toContainEqual(["git", "remote", "get-url", "--push", "fork"]);
+    expect(calls).toContainEqual(["git", "remote", "get-url", "--push", "--all", "fork"]);
     const list = calls.find(args => args[1] === "pr")!;
     expect(list[list.indexOf("--head") + 1]).toBe("remote-feature");
     expect(list[list.indexOf("--repo") + 1]).toBe("https://github.com/base/project");
   });
-  test("falls back to upstream remote branch", async () => {
+  test("uses configured upstream push mode", async () => {
     const { run, calls } = fixture({ tracking: "\t\tupstream\trefs/heads/remote-feature\n" });
     expect(await lookupPR(cwd, run)).not.toBeNull();
-    expect(calls).toContainEqual(["git", "remote", "get-url", "upstream"]);
+    expect(calls).toContainEqual(["git", "remote", "get-url", "--push", "--all", "upstream"]);
   });
   test("uses origin and local branch without tracking", async () => {
     const { run, calls } = fixture({ tracking: "\t\t\t\n", prs: [pr({ headRefName: "local-feature" })] });
     expect(await lookupPR(cwd, run)).not.toBeNull();
-    expect(calls).toContainEqual(["git", "remote", "get-url", "origin"]);
+    expect(calls).toContainEqual(["git", "remote", "get-url", "--push", "--all", "origin"]);
   });
   for (const remote of ["https://github.com/ALICE/project.git/", "ssh://git@github.com/Alice/project.git"]) {
     test(`accepts ${remote}`, async () => {
@@ -262,4 +273,55 @@ describe("current checks replace historical rollups", () => {
     await expect(lookupPR(cwd, fixture({ ...opts, currentChecks: {} }).run)).rejects.toThrow("Unexpected check rollup");
     await expect(lookupPR(cwd, fixture({ ...opts, fail: "checks" }).run)).rejects.toThrow("checks failure");
   });
+});
+
+
+describe("canonical GitHub host identity", () => {
+  test("accepts encoded HTTPS credentials without forwarding them to gh", async () => {
+    const { run, calls } = fixture({ remote: "https://alice:p%40ss@github.com/alice/project.git" });
+    expect((await lookupPR(cwd, run))?.number).toBe(42);
+    expect(calls).toContainEqual(["gh", "repo", "view", "github.com/alice/project", "--json", "nameWithOwner,url,parent"]);
+    expect(JSON.stringify(calls.filter(args => args[0] === "gh"))).not.toContain("p%40ss");
+  });
+  for (const remote of [
+    "https://GHE.example/Alice/Project.git",
+    "git@GHE.example:Alice/Project.git",
+    "ssh://git@ghe.example:2222/alice/project.git",
+  ]) {
+    test(`routes Enterprise requests for ${remote}`, async () => {
+      const { run, calls } = fixture({ remote,
+        repo: { nameWithOwner: "alice/project", url: "https://ghe.example/alice/project",
+          parent: { name: "project", owner: { login: "base" } } },
+        prs: [pr({ url: "https://ghe.example/base/project/pull/42", statusCheckRollup: [{}] })],
+        localPRs: [], currentChecks: [{ state: "SUCCESS" }],
+      });
+      expect((await lookupPR(cwd, run))?.checks?.passed).toBe(1);
+      expect(calls).toContainEqual(["gh", "repo", "view", "ghe.example/alice/project", "--json", "nameWithOwner,url,parent"]);
+      for (const args of calls.filter(args => args[0] === "gh" && args[1] === "pr")) {
+        expect(args[args.indexOf("--repo") + 1]).toMatch(/^https:\/\/ghe\.example\//);
+      }
+      const graphql = calls.find(args => args[1] === "api")!;
+      expect(graphql[graphql.indexOf("--hostname") + 1]).toBe("ghe.example");
+    });
+  }
+  test("does not infer SSH aliases or substitute the API host", async () => {
+    const { run, calls } = fixture({ remote: "git@work:alice/project.git" });
+    await expect(lookupPR(cwd, run)).rejects.toThrow("identity mismatch");
+    expect(calls.filter(args => args[0] === "gh")).toHaveLength(1);
+    expect(calls.some(args => args[0] === "ssh")).toBe(false);
+  });
+  for (const remote of [
+    "https://github.com:8443/alice/project.git", "https://github.com/other/../alice/project.git",
+    "https://github.com/alice/project.git?x=1", "git@github.com:alice/project.git#other",
+    "https://%67ithub.com/alice/project.git",
+    "https://alice:p%40ss@github.com/alice%2fother/project.git",
+    "https://github.com/alice%2fother/project.git", "https://github.com/%2e%2e/alice/project.git",
+    "https://github.com/alice\\project.git",
+  ]) {
+    test(`rejects ambiguous URL syntax ${remote}`, async () => {
+      const { run, calls } = fixture({ remote });
+      await expect(lookupPR(cwd, run)).rejects.toThrow();
+      expect(calls.some(args => args[0] === "gh")).toBe(false);
+    });
+  }
 });
