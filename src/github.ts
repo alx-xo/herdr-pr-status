@@ -1,4 +1,5 @@
 import { runCommand } from "./process";
+import { failure, LookupError } from "./feedback";
 
 export interface PRStatus {
   number: number;
@@ -102,10 +103,17 @@ async function unresolvedThreads(run: Runner, cwd: string, repoURL: string, numb
   return total;
 }
 
-/** Read-only lookup. null means detached HEAD or a confirmed absent PR; failures throw. */
-export async function lookupPR(cwd: string, run: Runner = runCommand): Promise<PRStatus | null> {
+/** Resolved local branch and push repository; no network requests. */
+export interface LookupContext { branch: string; head: string; headRepo: { host: string; name: string } }
+
+export async function resolveContext(cwd: string, run: Runner = runCommand): Promise<LookupContext> {
+  try { return await gitContext(cwd, run); }
+  catch (error) { throw failure(error, 'unresolved'); }
+}
+
+async function gitContext(cwd: string, run: Runner): Promise<LookupContext> {
   const branch = (await run(["git", "branch", "--show-current"], cwd)).trim();
-  if (!branch) return null;
+  if (!branch) throw new LookupError("unresolved", "No named Git branch (detached HEAD)", "No named Git branch (detached HEAD)");
   const tracking = (await run(["git", "for-each-ref",
     "--format=%(push:remotename)%09%(push:remoteref)%09%(upstream:remotename)%09%(upstream:remoteref)",
     `refs/heads/${branch}`], cwd)).trimEnd().split("\t");
@@ -126,12 +134,12 @@ export async function lookupPR(cwd: string, run: Runner = runCommand): Promise<P
     const remotes = (await run(["git", "remote"], cwd)).trim().split("\n").filter(Boolean);
     remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : undefined;
   }
-  if (!remote) throw new Error("Cannot resolve unambiguous push remote");
-  if (remote === ".") throw new Error("Branch tracks a local repository, not GitHub");
+  if (!remote) throw new LookupError("unresolved", "Cannot resolve unambiguous push remote", "Cannot resolve unambiguous push remote");
+  if (remote === ".") throw new LookupError("unresolved", "Branch tracks a local repository, not GitHub", "Branch tracks a local repository, not GitHub");
   const mirror = get(`remote.${remote}.mirror`);
   if (mirror !== undefined && (await run(["git", "config", "--type=bool", "--get",
     `remote.${remote}.mirror`], cwd)).trim() !== "false") {
-    throw new Error("Cannot resolve mirror push destination");
+    throw new LookupError("unresolved", "Cannot resolve mirror push destination", "Cannot resolve mirror push destination");
   }
   const refspecs = config.get(`remote.${remote}.push`) ?? [];
   let remoteRef: string | undefined;
@@ -139,7 +147,7 @@ export async function lookupPR(cwd: string, run: Runner = runCommand): Promise<P
     // Git resolves supported mappings. Multiple mappings can push this branch
     // to more than one head; even a plausible atom is not sufficient evidence.
     if (refspecs.length !== 1 || tracking[0] !== remote || !tracking[1]?.startsWith("refs/heads/")) {
-      throw new Error("Cannot resolve configured push refspec");
+      throw new LookupError("unresolved", "Cannot resolve configured push refspec", "Cannot resolve configured push refspec");
     }
     remoteRef = tracking[1];
   } else {
@@ -154,15 +162,25 @@ export async function lookupPR(cwd: string, run: Runner = runCommand): Promise<P
         (triangular || upstreamRefs.length === 0 || upstreamRef === `refs/heads/${branch}`))) {
       remoteRef = `refs/heads/${branch}`;
     } else {
-      throw new Error("Cannot resolve unambiguous push branch");
+      throw new LookupError("unresolved", "Cannot resolve unambiguous push branch", "Cannot resolve unambiguous push branch");
     }
   }
   const head = remoteRef.slice(11);
   // get-url expands insteadOf/pushInsteadOf and exposes every push destination.
   const urls = (await run(["git", "remote", "get-url", "--push", "--all", remote], cwd)).trim().split("\n");
-  if (urls.length !== 1 || !urls[0]) throw new Error("Cannot resolve unambiguous push URL");
+  if (urls.length !== 1 || !urls[0]) throw new LookupError("unresolved", "Cannot resolve unambiguous push URL", "Cannot resolve unambiguous push URL");
   const remoteURL = urls[0];
   const headRepo = repository(remoteURL);
+  return { branch, head, headRepo };
+}
+
+export async function lookupPR(cwd: string, run: Runner = runCommand, context?: LookupContext): Promise<PRStatus | null> {
+  const resolved = context ?? await resolveContext(cwd, run);
+  try { return await queryPR(cwd, run, resolved); }
+  catch (error) { throw failure(error); }
+}
+
+async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupContext): Promise<PRStatus | null> {
   // Resolve the selected remote explicitly; gh's checkout default may be unrelated.
   const repo = object(JSON.parse(await run(["gh", "repo", "view", `${headRepo.host}/${headRepo.name}`,
     "--json", "nameWithOwner,url,parent"], cwd)));

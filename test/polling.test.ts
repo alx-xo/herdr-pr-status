@@ -264,6 +264,7 @@ if(tool==='herdr') {
   if(args[0]==='repo') json({nameWithOwner:'test/repo',url:'https://github.com/test/repo',parent:null});
   else if(args[0]==='pr' && args[1]==='list') {
     const head=args[args.indexOf('--head')+1];log('lookup',head);
+    if(existsSync(dir+'/gate-new') && head==='new') await gate('release-new');
     if(${JSON.stringify(scenario)}!=='lock' && head==='old') await gate('release-lookup');
     const number={old:101,new:202,latest:303}[head];
     if(!number) throw Error('Unexpected head '+head);
@@ -301,12 +302,13 @@ test('worker retries changed checkouts without publishing obsolete metadata', as
     try {
       await f.cli('start');
       await f.until(async () => (await f.events('gate')).includes('release-lookup'));
-      expect(await f.published()).toEqual([]);
+      expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean))).toEqual([]);
       if (phase === 'publication') {
         // Let the old payload reach publication's async enablement check first.
         await f.release('release-lookup');
         await f.until(async () => (await f.events('gate')).includes('release-publication'));
       }
+      await f.release('gate-new');
       await writeFile(join(f.dir, 'branch'), 'new');
       if (phase === 'publication') {
         for (const client of f.connections) client.write(JSON.stringify({
@@ -314,22 +316,25 @@ test('worker retries changed checkouts without publishing obsolete metadata', as
         }) + '\n');
         // A subsequent workspace-list proves the observer finished its new-branch pass.
         await f.until(async () => (await f.events('observed')).includes('new'));
-        expect(await f.published()).toEqual([]);
+        expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean))).toEqual([]);
         await f.release('release-publication');
       } else {
         // Preserve coverage for unfocused checkouts with no periodic local observer.
         await f.release('release-lookup');
       }
+      await f.until(async () => (await f.events('gate')).includes('release-new'));
+      expect((await f.cli('status')).lastSuccessAt).toBeUndefined();
+      await f.release('release-new');
       // Completion is the worker's persisted cycle boundary, not command counts.
       await f.until(async () => (await f.cli('status')).cycles >= 2);
       await f.cli('stop');
       await f.until(async () => !(await f.cli('status')).running);
       expect(await f.events('lookup')).toEqual(['old', 'new']);
       // Compare the actual workspace and every token; ambient branch state proves nothing.
-      expect(await f.published()).toEqual([publication(202)]);
-      expect(await f.published()).not.toContainEqual(publication(101));
+      expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean))).toEqual([publication(202)]);
+      expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean))).not.toContainEqual(publication(101));
     } finally {
-      await f.release('release-lookup'); await f.release('release-publication'); await f.cleanup();
+      await f.release('release-lookup'); await f.release('release-publication'); await f.release('release-new'); await f.cleanup();
     }
   }
 }, 25000);
@@ -364,9 +369,56 @@ test('worker consumes the latest checkout after a gated observation and manual l
     await f.cli('stop');
     await f.until(async () => !(await f.cli('status')).running);
     expect(await f.events('lookup')).toEqual(['old', 'latest']);
-    expect(await f.published()).toEqual([publication(101), publication(303)]);
+    expect((await f.published()).filter(item => Object.values(item.tokens).some(Boolean))).toEqual([publication(101), publication(303)]);
   } finally {
     release?.(); await f.release('release-observation'); await f.release('release-latest-observation');
     await f.cleanup();
   }
 }, 20000);
+
+test('live status and manual refresh share same-context failure feedback without persisting PR data', async () => {
+  const f = await checkoutFixture('lock');
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles >= 1);
+    const initial = await f.cli('status');
+    expect(initial.workspaces?.[0]).toMatchObject({ freshness: 'fresh', lastSuccessAt: expect.any(String) });
+    await writeFile(join(f.dir, 'gh'), `#!${process.execPath}\nconsole.error('HTTP 401: Bad credentials https://user:secret@github.com/private?token=secret');process.exit(1);\n`, { mode: 0o700 });
+    // Failure intentionally exits nonzero, so invoke without the fixture's success assertion.
+    const child = Bun.spawn([process.execPath, 'src/main.ts', 'refresh'], { cwd: process.cwd(), env: f.env, stdout: 'pipe', stderr: 'pipe' });
+    const output = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(1);
+    const results = JSON.parse(output);
+    expect(results[0]).toMatchObject({ category: 'authentication', freshness: 'stale', lastSuccessAt: initial.workspaces[0].lastSuccessAt,
+      tokens: { ...publication(101).tokens, pr: `${defaults.icons.open} #101 ⚠` } });
+    const preview = Bun.spawn([process.execPath, 'src/main.ts', 'preview'], { cwd: process.cwd(), env: f.env, stdout: 'pipe', stderr: 'pipe' });
+    const previewOutput = JSON.parse(await new Response(preview.stdout).text());
+    expect(await preview.exited).toBe(1);
+    expect(previewOutput[0]).toMatchObject({ freshness: 'stale', lastSuccessAt: initial.workspaces[0].lastSuccessAt });
+    const current = await f.cli('status');
+    expect(current.workspaces[0]).toMatchObject({ category: 'authentication', freshness: 'stale', action: expect.any(String) });
+    expect(JSON.stringify(current)).not.toContain('secret');
+    expect(current.workspaces[0].tokens).toBeUndefined();
+  } finally { await f.cleanup(); }
+}, 15000);
+
+
+test('local observation retains a newer successful manual refresh after switching branches', async () => {
+  const f = await checkoutFixture('lock');
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles >= 1);
+    await writeFile(join(f.dir, 'branch'), 'new');
+    const manual = await f.cli('refresh');
+    expect(manual[0]).toMatchObject({ freshness: 'fresh', tokens: publication(202).tokens });
+    await writeFile(join(f.dir, 'gh'), `#!${process.execPath}\nconsole.error('HTTP 503');process.exit(1);\n`, { mode: 0o700 });
+    for (const client of f.connections) client.write(JSON.stringify({
+      event: 'workspace_focused', data: { type: 'workspace_focused', workspace_id: 'w1' },
+    }) + '\n');
+    await f.until(async () => (await f.cli('status')).workspaces?.[0]?.category === 'service');
+    const current = await f.cli('status');
+    expect(current.workspaces[0]).toMatchObject({ freshness: 'stale', lastSuccessAt: manual[0].lastSuccessAt });
+    expect((await f.published()).at(-1)).toEqual({ workspace: 'w1', tokens: { ...publication(202).tokens, pr: `${defaults.icons.open} #202 ⚠` } });
+    expect(current.lastError).toContain('retry after any rate limit reset');
+  } finally { await f.cleanup(); }
+}, 15000);

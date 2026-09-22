@@ -1,5 +1,5 @@
-import { refresh } from './refresh';
-import { control, loadConfig, manualRefresh, session, start, status, worker } from './polling';
+import { sanitize } from './feedback';
+import { control, loadConfig, manualRefresh, previewRefresh, session, start, status, worker } from './polling';
 
 export async function run(args: string[]): Promise<number> {
   const command = args[0] ?? 'info';
@@ -16,7 +16,7 @@ export async function run(args: string[]): Promise<number> {
     if (process.env.HERDR_ENV !== '1') throw new Error('Run preview/refresh inside Herdr (HERDR_ENV=1); lifecycle actions also require Herdr supplied state/config/socket directories');
     if (command === 'preview' || command === 'refresh') {
       const config = await loadConfig();
-      const results = command === 'preview' ? await refresh(config, true) : await manualRefresh(await session(), config);
+      const results = command === 'preview' ? await previewRefresh(config) : await manualRefresh(await session(), config);
       console.log(JSON.stringify(results, null, 2));
       return results.some(result => result.status === 'error') ? 1 : 0;
     }
@@ -32,7 +32,7 @@ export async function run(args: string[]): Promise<number> {
     }
     return 0;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(sanitize(error instanceof Error ? error.message : String(error)));
     return 1;
   }
 }

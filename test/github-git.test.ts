@@ -132,7 +132,7 @@ for (const scenario of [
         } } } } });
       };
       if (scenario.detached) {
-        expect(await lookupPR(cwd, run)).toBeNull();
+        await expect(lookupPR(cwd, run)).rejects.toMatchObject({ category: 'unresolved' });
         expect(ghCalls).toBe(0);
       } else if (scenario.head) expect((await lookupPR(cwd, run))?.number).toBe(42);
       else {
