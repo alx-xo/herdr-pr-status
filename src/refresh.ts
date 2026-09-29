@@ -1,4 +1,4 @@
-import { lookupPR, resolveContext, type PRStatus } from './github';
+import { lookupPR, resolveContext, NotGitHubError, type LookupContext, type PRStatus } from './github';
 import { failure, LookupError, type FailureCategory } from './feedback';
 import { formatPR, type Config, type Tokens } from './format';
 import { discoverCheckout, listWorkspaces, publishTokens, type Workspace } from './herdr';
@@ -26,6 +26,20 @@ export class StaleCheckoutError extends Error {}
 /** Runtime publishers must validate after their asynchronous permission checks. */
 export type Publisher = (id: string, tokens: Tokens, validate: () => Promise<void>) => Promise<void>;
 
+/** Keep absence detection identical during discovery and publication validation. */
+async function workspaceContext(workspace: Workspace, run: Runner): Promise<{ skipped: string } | { cwd: string; resolved: LookupContext }> {
+  const checkout = await discoverCheckout(workspace, run);
+  if (!checkout.cwd) {
+    if (checkout.skipped === 'No Git checkout' || checkout.skipped === 'Git checkout has no remote') return { skipped: checkout.skipped };
+    throw new LookupError('unresolved', checkout.skipped ?? 'No Git checkout', checkout.skipped ?? 'No Git checkout');
+  }
+  try { return { cwd: checkout.cwd, resolved: await resolveContext(checkout.cwd, run) }; }
+  catch (error) {
+    if (error instanceof NotGitHubError) return { skipped: error.message };
+    throw error;
+  }
+}
+
 /** Sequential workspaces bound gh traffic; one bad checkout does not block others. */
 export async function refresh(config: Config, preview: boolean, run: Runner = runCommand, targets?: Workspace[], state: RefreshState = new Map(), publisher?: Publisher): Promise<RefreshResult[]> {
   const publish: Publisher = publisher ?? (async (id, tokens, validate) => {
@@ -42,10 +56,25 @@ export async function refresh(config: Config, preview: boolean, run: Runner = ru
     let pr: PRStatus | null = null;
     let problem: ReturnType<typeof failure> | undefined;
     try {
-      const checkout = await discoverCheckout(workspace, run);
-      cwd = checkout.cwd;
-      if (!cwd) throw new LookupError('unresolved', checkout.skipped ?? 'No Git checkout', checkout.skipped ?? 'No Git checkout');
-      const resolved = await resolveContext(cwd, run);
+      const discovered = await workspaceContext(workspace, run);
+      if ('skipped' in discovered) {
+        // Absence is normal, but still clear metadata left by an earlier checkout.
+        const tokens = formatPR(null, config);
+        const validate = async () => {
+          try {
+            const current = await workspaceContext(workspace, run);
+            if (!('skipped' in current) || current.skipped !== discovered.skipped) throw new StaleCheckoutError();
+          } catch { throw new StaleCheckoutError(); }
+        };
+        if (!preview) {
+          await publish(id, tokens, validate);
+          state.delete(id);
+        } else await validate();
+        results.push({ ...base, status: 'skipped', reason: discovered.skipped, tokens });
+        continue;
+      }
+      cwd = discovered.cwd;
+      const resolved = discovered.resolved;
       branch = resolved.branch;
       context = JSON.stringify([cwd, resolved]);
       if (!preview && state.get(id)?.context !== context) {

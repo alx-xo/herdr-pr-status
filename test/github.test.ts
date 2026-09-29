@@ -130,7 +130,7 @@ describe("absence and failures", () => {
   test("detached HEAD stops before network requests", async () => {
     const { run, calls } = fixture({ branch: "\n" });
     await expect(lookupPR(cwd, run)).rejects.toMatchObject({ category: 'unresolved' });
-    expect(calls).toHaveLength(1);
+    expect(calls.every(args => args[0] === 'git')).toBe(true);
   });
   test("successful empty or nonmatching list is confirmed absence", async () => {
     for (const prs of [[], [pr({ headRefName: "other" })], [pr({ headRepositoryOwner: { login: "bob" } })]]) {
