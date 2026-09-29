@@ -103,20 +103,22 @@ async function unresolvedThreads(run: Runner, cwd: string, repoURL: string, numb
   return total;
 }
 
+/** A positively identified destination where GitHub PR status does not apply. */
+export class NotGitHubError extends Error {}
+
 /** Resolved local branch and push repository; no network requests. */
 export interface LookupContext { branch: string; head: string; headRepo: { host: string; name: string } }
 
 export async function resolveContext(cwd: string, run: Runner = runCommand): Promise<LookupContext> {
   try { return await gitContext(cwd, run); }
-  catch (error) { throw failure(error, 'unresolved'); }
+  catch (error) {
+    if (error instanceof NotGitHubError) throw error;
+    throw failure(error, 'unresolved');
+  }
 }
 
 async function gitContext(cwd: string, run: Runner): Promise<LookupContext> {
   const branch = (await run(["git", "branch", "--show-current"], cwd)).trim();
-  if (!branch) throw new LookupError("unresolved", "No named Git branch (detached HEAD)", "No named Git branch (detached HEAD)");
-  const tracking = (await run(["git", "for-each-ref",
-    "--format=%(push:remotename)%09%(push:remoteref)%09%(upstream:remotename)%09%(upstream:remoteref)",
-    `refs/heads/${branch}`], cwd)).trimEnd().split("\t");
   // Read effective config (including includes/worktree config) without executing
   // transports. Preserve repeated push refspecs instead of silently taking one.
   const config = new Map<string, string[]>();
@@ -135,7 +137,28 @@ async function gitContext(cwd: string, run: Runner): Promise<LookupContext> {
     remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : undefined;
   }
   if (!remote) throw new LookupError("unresolved", "Cannot resolve unambiguous push remote", "Cannot resolve unambiguous push remote");
-  if (remote === ".") throw new LookupError("unresolved", "Branch tracks a local repository, not GitHub", "Branch tracks a local repository, not GitHub");
+  if (remote === ".") throw new NotGitHubError("Branch tracks a local repository, not GitHub");
+  // get-url expands insteadOf/pushInsteadOf and exposes every push destination.
+  const urls = (await run(["git", "remote", "get-url", "--push", "--all", remote], cwd)).trim().split("\n");
+  if (urls.length !== 1 || !urls[0]) throw new LookupError("unresolved", "Cannot resolve unambiguous push URL", "Cannot resolve unambiguous push URL");
+  const remoteURL = urls[0];
+  // Local transports and known public providers are not failed GitHub lookups.
+  // Unknown hosts remain eligible for GitHub Enterprise; do not infer a provider
+  // from missing authentication or a failed network request.
+  if (!remoteURL.includes(":") || remoteURL.startsWith("/") || remoteURL.startsWith("./") || remoteURL.startsWith("../") || remoteURL.startsWith("file://")) {
+    throw new NotGitHubError("Push destination is a local repository, not GitHub");
+  }
+  const normalized = remoteURL.includes("://") ? remoteURL
+    : remoteURL.replace(/^([^/@]+@)?([^/:]+):([^/].*)$/, "ssh://$2/$3");
+  const host = new URL(normalized).hostname.toLowerCase();
+  if (["gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht", "git.sr.ht"].includes(host)) {
+    throw new NotGitHubError("Push destination is a non-GitHub provider");
+  }
+  const headRepo = repository(remoteURL);
+  if (!branch) throw new LookupError("unresolved", "No named Git branch (detached HEAD)", "No named Git branch (detached HEAD)");
+  const tracking = (await run(["git", "for-each-ref",
+    "--format=%(push:remotename)%09%(push:remoteref)%09%(upstream:remotename)%09%(upstream:remoteref)",
+    `refs/heads/${branch}`], cwd)).trimEnd().split("\t");
   const mirror = get(`remote.${remote}.mirror`);
   if (mirror !== undefined && (await run(["git", "config", "--type=bool", "--get",
     `remote.${remote}.mirror`], cwd)).trim() !== "false") {
@@ -166,11 +189,6 @@ async function gitContext(cwd: string, run: Runner): Promise<LookupContext> {
     }
   }
   const head = remoteRef.slice(11);
-  // get-url expands insteadOf/pushInsteadOf and exposes every push destination.
-  const urls = (await run(["git", "remote", "get-url", "--push", "--all", remote], cwd)).trim().split("\n");
-  if (urls.length !== 1 || !urls[0]) throw new LookupError("unresolved", "Cannot resolve unambiguous push URL", "Cannot resolve unambiguous push URL");
-  const remoteURL = urls[0];
-  const headRepo = repository(remoteURL);
   return { branch, head, headRepo };
 }
 

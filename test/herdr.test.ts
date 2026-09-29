@@ -85,3 +85,87 @@ test('targeted refresh avoids all-workspace listing and publishes only its subse
   expect(published).toEqual(['w1']);
   expect(await refresh(defaults, false, run, [])).toEqual([]);
 });
+
+for (const mode of ['non-git', 'no-remote'] as const) {
+  for (const preview of [false, true]) {
+    test(`${mode} workspace clears PR noise without GitHub lookup (preview=${preview})`, async () => {
+      const published: string[][] = [];
+      const run: Runner = async args => {
+        if (args[1] === 'pane') return JSON.stringify({ result: { panes: [{ cwd: '/notes' }] } });
+        if (args[1] === 'rev-parse') {
+          if (mode === 'non-git') throw new Error('fatal: not a git repository');
+          return '/notes';
+        }
+        if (args[1] === 'remote') return '';
+        if (args[2] === 'report-metadata') { published.push(args); return ''; }
+        throw new Error(`Unexpected ${args.join(' ')}`);
+      };
+      const state = new Map([['w1', { context: 'old', cwd: '/old', branch: 'main', pr: null, lastSuccessAt: 'old' }]]);
+      const [result] = await refresh(defaults, preview, run, [workspace], state);
+      expect(result).toMatchObject({ status: 'skipped', reason: mode === 'non-git' ? 'No Git checkout' : 'Git checkout has no remote',
+        tokens: { pr: '', pr_checks: '', pr_review: '', pr_threads: '' } });
+      expect(result?.category).toBeUndefined();
+      expect(published).toHaveLength(preview ? 0 : 1);
+      if (!preview) {
+        expect(published[0]?.filter(arg => arg === '--clear-token')).toHaveLength(4);
+        expect(published[0]).not.toContain('--token');
+      }
+      expect(state.has('w1')).toBe(preview);
+    });
+  }
+}
+
+for (const change of ['checkout', 'failure'] as const) {
+  test(`absence revalidation ${change} never publishes unchecked metadata`, async () => {
+    let discoveries = 0;
+    const writes: string[][] = [];
+    const run: Runner = async args => {
+      if (args[1] === 'pane') {
+        discoveries++;
+        if (discoveries > 1 && change === 'failure') throw new Error('pane lookup failed');
+        return JSON.stringify({ result: { panes: [{ cwd: '/notes' }] } });
+      }
+      if (args[1] === 'rev-parse') {
+        if (discoveries === 1) throw new Error('fatal: not a git repository');
+        return '/notes';
+      }
+      if (args[1] === 'remote') return 'origin';
+      if (args[2] === 'report-metadata') { writes.push(args); return ''; }
+      throw new Error('Unexpected command');
+    };
+    const [result] = await refresh(defaults, false, run, [workspace]);
+    expect(result).toMatchObject({ status: 'skipped', stale: true });
+    expect(writes).toEqual([]);
+  });
+}
+
+for (const remote of ['https://gitlab.com/team/subgroup/repo.git', 'git@bitbucket.org:team/repo.git', 'https://codeberg.org/team/repo.git', 'git@git.sr.ht:~user/repo', '/srv/repo.git', '../repo.git', 'file:///srv/repo.git', '.']) {
+  for (const mode of ['normal', 'detached', 'matching', 'mirror', 'refspecs'] as const) {
+    for (const preview of [false, true]) {
+      test(`non-GitHub remote ${remote} stays quiet (${mode}, preview=${preview})`, async () => {
+        const writes: string[][] = [];
+        const run: Runner = async args => {
+          if (args[1] === 'rev-parse') return '/repo';
+          if (args[1] === 'remote') return args.includes('get-url') ? remote : 'origin';
+          if (args[1] === 'branch') return mode === 'detached' ? '' : 'main';
+          if (args[1] === 'for-each-ref') return '';
+          if (args[1] === 'config') {
+            const destination = remote === '.' ? 'remote.pushdefault\n.\0' : '';
+            const push = mode === 'matching' ? 'push.default\nmatching\0' : mode === 'mirror' ? 'remote.origin.mirror\ntrue\0'
+              : mode === 'refspecs' ? 'remote.origin.push\nrefs/heads/a:refs/heads/a\0remote.origin.push\nrefs/heads/b:refs/heads/b\0' : '';
+            return destination + push;
+          }
+          if (args[2] === 'report-metadata') { writes.push(args); return ''; }
+          throw new Error(`Unexpected ${args.join(' ')}`);
+        };
+        const state = new Map([['w1', { context: 'old', cwd: '/old', branch: 'main', pr: null, lastSuccessAt: 'old' }]]);
+        const [result] = await refresh(defaults, preview, run, [{ ...workspace, worktree: { checkout_path: '/repo' } }], state);
+        expect(result).toMatchObject({ status: 'skipped', tokens: { pr: '', pr_checks: '', pr_review: '', pr_threads: '' } });
+        expect(result?.category).toBeUndefined();
+        expect(writes).toHaveLength(preview ? 0 : 1);
+        expect(writes.every(args => !args.includes('--token'))).toBe(true);
+        expect(state.has('w1')).toBe(preview);
+      });
+    }
+  }
+}
