@@ -238,7 +238,7 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
         || owner.includes("/") || parent.name.includes("/")) throw new Error("Missing GitHub parent repository identity");
     baseURL = `https://${headRepo.host}/${owner}/${parent.name}`;
   }
-  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision";
+  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision,reviewRequests";
   const matches = new Map<string, ObjectValue>();
   // A fork can have PRs targeting itself as well as its parent. Query both:
   // an empty parent alone does not prove that this branch has no PR.
@@ -283,7 +283,10 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
   }
   result.review = pr.reviewDecision === "APPROVED" ? "approved"
     : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes_requested"
-    : pr.reviewDecision === "REVIEW_REQUIRED" ? "required" : null;
+    : pr.reviewDecision === "REVIEW_REQUIRED" ? "required"
+    // GitHub leaves reviewDecision empty when no branch rule requires review,
+    // e.g. a stacked PR. Requested reviewers still mean it awaits review.
+    : !pr.reviewDecision && Array.isArray(pr.reviewRequests) && pr.reviewRequests.length > 0 ? "required" : null;
   result.threads = await unresolvedThreads(run, cwd, String(pr.lookupBaseURL), pr.number);
   return result;
 }

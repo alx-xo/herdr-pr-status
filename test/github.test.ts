@@ -169,6 +169,14 @@ describe("independent PR state", () => {
       expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision })] }).run))?.review).toBe(expected);
     });
   }
+  test("empty decision with pending review requests awaits review", async () => {
+    // GitHub leaves reviewDecision empty when no branch rule requires review,
+    // e.g. a stacked PR targeting a feature branch.
+    const reviewRequests = [{ __typename: "Team", slug: "dev-gram" }];
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "", reviewRequests })] }).run))?.review).toBe("required");
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "", reviewRequests: [] })] }).run))?.review).toBeNull();
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "APPROVED", reviewRequests })] }).run))?.review).toBe("approved");
+  });
   test("normalizes check runs and legacy status contexts", async () => {
     const passed = ["SUCCESS", "NEUTRAL", "SKIPPED"];
     const failed = ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
