@@ -1,5 +1,23 @@
 import type { PRStatus } from './github';
 
+// Octicons from Nerd Fonts v3.4.0, and single-width, non-emoji Unicode
+// symbols for fonts without them.
+export const iconSets = {
+  nerdFont: {
+    open: '\uf407', draft: '\uf4dd', merged: '\uf419', closed: '\uf4dc',
+    conflict: '\uf47f', queued: '\uf4db', ready: '\uf427',
+    passed: '\uf42e', failed: '\uf467', pending: '\uf43a',
+    approved: '\uf49e', changes_requested: '\uf440', required: '\uf4af',
+  },
+  unicode: {
+    open: '\u25c9', draft: '\u25cc', merged: '\u21a6', closed: '\u2298',
+    conflict: '\u22a0', queued: '\u22ef', ready: '\u279c',
+    passed: '\u2713', failed: '\u2717', pending: '\u25d4',
+    approved: '\u2713', changes_requested: '\u2206', required: '\u22a1',
+  },
+};
+type IconSet = keyof typeof iconSets;
+
 export const tokenNames = ['pr', 'pr_checks', 'pr_review', 'pr_threads'] as const;
 export type Tokens = Record<(typeof tokenNames)[number], string>;
 export const defaults = {
@@ -12,13 +30,8 @@ export const defaults = {
     approved: 'approved', changes_requested: 'changes', required: 'review',
     threads: 'threads', unknown: '?',
   },
-  // Octicons from Nerd Fonts v3.4.0. A Nerd Font is required.
-  icons: {
-    open: '\uf407', draft: '\uf4dd', merged: '\uf419', closed: '\uf4dc',
-    conflict: '\uf47f', queued: '\uf4db', ready: '\uf427',
-    passed: '\uf42e', failed: '\uf467', pending: '\uf43a',
-    approved: '\uf49e', changes_requested: '\uf440', required: '\uf4af',
-  },
+  iconSet: 'nerdFont' as IconSet,
+  icons: { ...iconSets.nerdFont },
 };
 export type Config = typeof defaults;
 
@@ -31,7 +44,14 @@ function record(value: unknown, name: string): Record<string, unknown> {
 export function parseConfig(value: unknown): Config {
   const raw = record(value, 'config');
   const result = structuredClone(defaults);
+  // Resolve the icon set first so icon overrides apply on top of it.
+  if (Object.hasOwn(raw, 'iconSet')) {
+    if (raw.iconSet !== 'nerdFont' && raw.iconSet !== 'unicode') throw new Error('iconSet must be "nerdFont" or "unicode"');
+    result.iconSet = raw.iconSet;
+    result.icons = { ...iconSets[raw.iconSet] };
+  }
   for (const [key, val] of Object.entries(raw)) {
+    if (key === 'iconSet') continue;
     if (key === 'pollSeconds' || key === 'activePollSeconds') {
       if (typeof val !== 'number' || !Number.isInteger(val) || val < 15 || val > 3600) throw new Error(`${key} must be an integer from 15 to 3600`);
       result[key] = val;

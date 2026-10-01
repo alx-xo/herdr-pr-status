@@ -47,6 +47,8 @@ Passing checks and approved reviews are green; failed checks and changes request
 are red. Other check/review values use yellow, except unknown review status, which
 is muted. Thread counts use sapphire, with a muted rule for visible zero counts.
 Known zero threads are hidden by default, so that rule matters only when
-`hideZeroThreads` is false. Absent PRs clear all four tokens. Change these matchers
+`hideZeroThreads` is false. Absent PRs clear all four tokens. With `"iconSet": "unicode"`,
+use `"\u2713"` for passing checks and approved reviews, `"\u2717"` for failed checks and
+`"\u2206"` for changes requested. Change these matchers
 if you customize icons or labels. The plugin only publishes tokens: it does not
 install these rows or modify your Herdr configuration.
