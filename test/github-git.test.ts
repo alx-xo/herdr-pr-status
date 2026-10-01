@@ -9,6 +9,11 @@ for (const scenario of [
   { name: "non-origin upstream maps remote branch", rename: true, mode: "upstream", head: "remote-feature" },
   { name: "linked worktree uses its own branch", worktree: true, same: true, head: "local-feature" },
   { name: "detached HEAD does not call GitHub", detached: true },
+  { name: "rebase in progress uses the branch being rebased", rebasing: true, same: true, head: "local-feature" },
+  { name: "rebase in linked worktree uses its own branch", rebasing: true, worktree: true, same: true, head: "local-feature" },
+  { name: "bisect in progress uses the branch it started from", bisecting: true, same: true, head: "local-feature" },
+  { name: "bisect in linked worktree uses its own branch", bisecting: true, worktree: true, same: true, head: "local-feature" },
+  { name: "bisect started from detached HEAD does not call GitHub", bisecting: true, detached: true },
   { name: "URL insteadOf expands push identity", rewrite: true, same: true, head: "local-feature" },
   { name: "pushInsteadOf expands push identity", pushRewrite: true, same: true, head: "local-feature" },
   { name: "explicit push URL overrides pushInsteadOf", pushRewrite: true, pushURL: true, same: true, head: "local-feature" },
@@ -115,6 +120,24 @@ for (const scenario of [
         await git("remote", "set-url", "origin", "https://github.com/wrong/project.git");
       }
       if (scenario.detached) await git("checkout", "--detach");
+      if (scenario.bisecting) {
+        // Three commits leave one midpoint for bisect to check out detached.
+        const id = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid"];
+        const middle = (await git(...id, "commit-tree", tree, "-p", commit, "-m", "middle")).trim();
+        const last = (await git(...id, "commit-tree", tree, "-p", middle, "-m", "last")).trim();
+        if (!scenario.detached) await git("update-ref", "refs/heads/local-feature", last);
+        await git("reset", "--hard", last);
+        await git("bisect", "start", last, commit);
+        expect(await git("branch", "--show-current")).toBe("");
+      }
+      if (scenario.rebasing) {
+        // Replay one commit and stop it with a failing exec: HEAD stays detached mid-rebase.
+        const child = (await git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit-tree", tree, "-p", commit, "-m", "child")).trim();
+        await git("update-ref", "refs/heads/local-feature", child);
+        await git("reset", "--hard", "local-feature");
+        await expect(git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "rebase", "--force-rebase", "--exec", "false", commit)).rejects.toThrow();
+        expect(await git("branch", "--show-current")).toBe("");
+      }
       const run: Runner = async (args, actualCwd) => {
         expect(actualCwd).toBe(cwd);
         if (args[0] === "git") return git(...args.slice(1));

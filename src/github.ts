@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { runCommand } from "./process";
 import { failure, LookupError } from "./feedback";
 
@@ -140,8 +142,29 @@ export async function resolveContext(cwd: string, run: Runner = runCommand): Pro
   }
 }
 
+// A rebase or bisect detaches HEAD but records the branch it returns to.
+// Resolve that branch so the operation keeps its PR status instead of warning.
+async function operationBranch(cwd: string, run: Runner): Promise<string> {
+  const [rebaseMerge, rebaseApply, bisect] = (await run(["git", "rev-parse",
+    "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name",
+    "--git-path", "BISECT_START"], cwd)).trim().split("\n");
+  const read = async (path: string | undefined) =>
+    path ? (await readFile(resolve(cwd, path), "utf8").catch(() => "")).trim() : "";
+  for (const path of [rebaseMerge, rebaseApply]) {
+    const ref = await read(path);
+    if (ref.startsWith("refs/heads/")) return ref.slice(11);
+  }
+  // BISECT_START holds a short branch name, or a commit when bisect began
+  // detached. Only accept a name that is an existing local branch.
+  const start = await read(bisect);
+  if (start && (await run(["git", "for-each-ref", "--format=%(refname)", `refs/heads/${start}`], cwd)).trim() === `refs/heads/${start}`) {
+    return start;
+  }
+  return "";
+}
+
 async function gitContext(cwd: string, run: Runner): Promise<LookupContext> {
-  const branch = (await run(["git", "branch", "--show-current"], cwd)).trim();
+  const branch = (await run(["git", "branch", "--show-current"], cwd)).trim() || await operationBranch(cwd, run);
   // Read effective config (including includes/worktree config) without executing
   // transports. Preserve repeated push refspecs instead of silently taking one.
   const config = new Map<string, string[]>();
