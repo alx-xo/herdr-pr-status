@@ -41,11 +41,34 @@ function repository(url: string): { host: string; name: string } {
   return { host: parsed.hostname.toLowerCase(), name: name.toLowerCase() };
 }
 
+function actionsRun(check: ObjectValue): { key: string; id: number } | null {
+  const id = /\/actions\/runs\/(\d+)(?:\/|$)/.exec(String(check.link ?? ""))?.[1];
+  if (id === undefined || typeof check.workflow !== "string" || !check.workflow) return null;
+  return { key: `${check.workflow}\0${String(check.event ?? "")}`, id: Number(id) };
+}
+
+// A concurrency group cancels a duplicate run of the same workflow. Its matrix
+// jobs keep unexpanded names, so gh's newest-per-name selection keeps them
+// forever beside the newer run's jobs. Drop cancellations from older runs.
+function withoutSupersededCancellations(value: unknown[]): unknown[] {
+  const latest = new Map<string, number>();
+  for (const item of value) {
+    const run = actionsRun(object(item));
+    if (run) latest.set(run.key, Math.max(latest.get(run.key) ?? 0, run.id));
+  }
+  return value.filter(item => {
+    const check = object(item);
+    const run = actionsRun(check);
+    return !(check.state === "CANCELLED" && run && run.id < latest.get(run.key)!);
+  });
+}
+
 function checks(value: unknown): PRStatus["checks"] {
   if (value == null) return null;
   if (!Array.isArray(value)) throw new Error("Unexpected check rollup");
-  const result = { passed: 0, failed: 0, pending: 0, total: value.length };
-  for (const item of value) {
+  const current = withoutSupersededCancellations(value);
+  const result = { passed: 0, failed: 0, pending: 0, total: current.length };
+  for (const item of current) {
     const check = object(item);
     const state = check.state;
     if (["SUCCESS", "NEUTRAL", "SKIPPED"].includes(String(state))) result.passed++;
@@ -215,7 +238,7 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
         || owner.includes("/") || parent.name.includes("/")) throw new Error("Missing GitHub parent repository identity");
     baseURL = `https://${headRepo.host}/${owner}/${parent.name}`;
   }
-  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision";
+  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision,reviewRequests";
   const matches = new Map<string, ObjectValue>();
   // A fork can have PRs targeting itself as well as its parent. Query both:
   // an empty parent alone does not prove that this branch has no PR.
@@ -255,12 +278,15 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
   if (pr.statusCheckRollup != null) {
     if (!Array.isArray(pr.statusCheckRollup)) throw new Error("Unexpected check rollup");
     result.checks = pr.statusCheckRollup.length === 0 ? checks([]) : checks(JSON.parse(await run([
-      "gh", "pr", "checks", String(pr.number), "--repo", String(pr.lookupBaseURL), "--json", "state",
+      "gh", "pr", "checks", String(pr.number), "--repo", String(pr.lookupBaseURL), "--json", "state,workflow,event,link",
     ], cwd)));
   }
   result.review = pr.reviewDecision === "APPROVED" ? "approved"
     : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes_requested"
-    : pr.reviewDecision === "REVIEW_REQUIRED" ? "required" : null;
+    : pr.reviewDecision === "REVIEW_REQUIRED" ? "required"
+    // GitHub leaves reviewDecision empty when no branch rule requires review,
+    // e.g. a stacked PR. Requested reviewers still mean it awaits review.
+    : !pr.reviewDecision && Array.isArray(pr.reviewRequests) && pr.reviewRequests.length > 0 ? "required" : null;
   result.threads = await unresolvedThreads(run, cwd, String(pr.lookupBaseURL), pr.number);
   return result;
 }

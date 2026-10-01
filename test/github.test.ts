@@ -169,6 +169,14 @@ describe("independent PR state", () => {
       expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision })] }).run))?.review).toBe(expected);
     });
   }
+  test("empty decision with pending review requests awaits review", async () => {
+    // GitHub leaves reviewDecision empty when no branch rule requires review,
+    // e.g. a stacked PR targeting a feature branch.
+    const reviewRequests = [{ __typename: "Team", slug: "dev-gram" }];
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "", reviewRequests })] }).run))?.review).toBe("required");
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "", reviewRequests: [] })] }).run))?.review).toBeNull();
+    expect((await lookupPR(cwd, fixture({ prs: [pr({ reviewDecision: "APPROVED", reviewRequests })] }).run))?.review).toBe("approved");
+  });
   test("normalizes check runs and legacy status contexts", async () => {
     const passed = ["SUCCESS", "NEUTRAL", "SKIPPED"];
     const failed = ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
@@ -250,7 +258,7 @@ describe("current checks replace historical rollups", () => {
     const { run, calls } = fixture({ prs: [pr({ statusCheckRollup: historical })], currentChecks: [{ state: "SUCCESS" }] });
     const result = await lookupPR(cwd, run);
     expect(result?.checks).toEqual({ passed: 1, failed: 0, pending: 0, total: 1 });
-    expect(calls).toContainEqual(["gh", "pr", "checks", "42", "--repo", "https://github.com/base/project", "--json", "state"]);
+    expect(calls).toContainEqual(["gh", "pr", "checks", "42", "--repo", "https://github.com/base/project", "--json", "state,workflow,event,link"]);
     expect(formatPR(result).pr_checks).toBe("\uf42e 1/1");
   });
   test("a current cancellation or failure remains failed, not hidden by old success", async () => {
@@ -265,6 +273,38 @@ describe("current checks replace historical rollups", () => {
   });
   test("distinct workflow/event checks returned by gh remain distinct", async () => {
     const result = await lookupPR(cwd, fixture({ prs: [pr({ statusCheckRollup: historical })], currentChecks: [{ state: "SUCCESS" }, { state: "FAILURE" }] }).run);
+    expect(result?.checks).toEqual({ passed: 1, failed: 1, pending: 0, total: 2 });
+  });
+  // Concurrency groups cancel a duplicate run of the same workflow. Its matrix
+  // jobs keep unexpanded names, so gh never replaces them with the newer run.
+  const run = (id: number) => `https://github.com/base/project/actions/runs/${id}/job/${id}0`;
+  const cancelledDuplicate = [
+    { state: "CANCELLED", workflow: "Pull Request", event: "pull_request", link: run(100) },
+    { state: "CANCELLED", workflow: "Pull Request", event: "pull_request", link: run(100) },
+    { state: "SUCCESS", workflow: "Pull Request", event: "pull_request", link: run(101) },
+    { state: "NEUTRAL", workflow: "", event: "", link: "https://cubic.dev/review" },
+  ];
+  test("cancellation in a superseded run of the same workflow is ignored", async () => {
+    const result = await lookupPR(cwd, fixture({ prs: [pr({ statusCheckRollup: historical })], currentChecks: cancelledDuplicate }).run);
+    expect(result?.checks).toEqual({ passed: 2, failed: 0, pending: 0, total: 2 });
+  });
+  test("cancellation is kept in the latest run, another workflow or another event", async () => {
+    for (const later of [
+      { state: "SUCCESS", workflow: "Pull Request", event: "pull_request", link: run(99) },
+      { state: "SUCCESS", workflow: "Hygiene", event: "pull_request", link: run(101) },
+      { state: "SUCCESS", workflow: "Pull Request", event: "push", link: run(101) },
+    ]) {
+      const currentChecks = [{ state: "CANCELLED", workflow: "Pull Request", event: "pull_request", link: run(100) }, later];
+      const result = await lookupPR(cwd, fixture({ prs: [pr({ statusCheckRollup: historical })], currentChecks }).run);
+      expect(result?.checks).toEqual({ passed: 1, failed: 1, pending: 0, total: 2 });
+    }
+  });
+  test("superseded failures still count as failed", async () => {
+    const currentChecks = [
+      { state: "FAILURE", workflow: "Pull Request", event: "pull_request", link: run(100) },
+      { state: "SUCCESS", workflow: "Pull Request", event: "pull_request", link: run(101) },
+    ];
+    const result = await lookupPR(cwd, fixture({ prs: [pr({ statusCheckRollup: historical })], currentChecks }).run);
     expect(result?.checks).toEqual({ passed: 1, failed: 1, pending: 0, total: 2 });
   });
   test("unknown state is unknown; malformed output and failed requests are errors", async () => {
