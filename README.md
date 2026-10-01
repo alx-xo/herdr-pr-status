@@ -55,6 +55,8 @@ PR warning or badges. Local push destinations and known public non-GitHub provid
 clears any old PR tokens in these spaces; preview reports the outcome without
 writing metadata. Unknown remote hosts remain eligible for GitHub Enterprise, so
 self-hosted non-GitHub providers are not automatically classified as absent.
+A rebase or bisect in progress keeps showing the PR for the branch being
+rebased or bisected; other detached HEADs report a warning.
 Authentication, network, ambiguous-checkout, and other genuine lookup failures
 still report warnings.
 

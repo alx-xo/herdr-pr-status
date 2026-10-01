@@ -26,6 +26,7 @@ function fixture(options: {
     const command = args.slice(0, 3).join(" ");
     if (options.fail === "git" && args[0] === "git") throw new Error("git failure");
     if (command === "git branch --show-current") return options.branch ?? "local-feature\n";
+    if (command === "git rev-parse --git-path") return "/nonexistent/rebase-merge/head-name\n/nonexistent/rebase-apply/head-name\n/nonexistent/BISECT_START\n";
     if (args[1] === "for-each-ref") return options.tracking ?? "fork\trefs/heads/remote-feature\torigin\trefs/heads/wrong\n";
     if (command === "git config --null") {
       const [push, pushRef, upstream, upstreamRef] = (options.tracking ?? "fork\trefs/heads/remote-feature\torigin\trefs/heads/wrong").trimEnd().split("\t");
