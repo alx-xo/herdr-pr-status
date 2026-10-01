@@ -52,8 +52,32 @@ test('nerdFont preserves absence, unknown, zero and visibility behavior', () => 
   expect(formatPR(pr, parseConfig({ visible: { pr: false, pr_checks: false, pr_review: false } })))
     .toEqual({ pr: '', pr_checks: '', pr_review: '', pr_threads: '' });
 });
-test('removed iconStyle setting is rejected', () => {
-  expect(() => parseConfig({ iconStyle: 'nerdFont' })).toThrow('Unknown setting: iconStyle');
+test('unicode icon set replaces every Nerd Font glyph', () => {
+  const config = parseConfig({ iconSet: 'unicode' });
+  expect(config.icons).toEqual({
+    open: '\u25c9', draft: '\u25cc', merged: '\u21a6', closed: '\u2298',
+    conflict: '\u22a0', queued: '\u22ef', ready: '\u279c',
+    passed: '\u2713', failed: '\u2717', pending: '\u25d4',
+    approved: '\u2713', changes_requested: '\u2206', required: '\u22a1',
+  });
+  expect(formatPR(pr, config)).toEqual({ pr: '\u25cc #42', pr_checks: '\u2717 2/3', pr_review: '\u2713 approved', pr_threads: '' });
+  expect(defaults.icons.draft).toBe('\uf4dd');
+});
+test('icon set defaults to nerdFont and accepts it explicitly', () => {
+  expect(defaults.iconSet).toBe('nerdFont');
+  expect(parseConfig({ iconSet: 'nerdFont' })).toEqual(defaults);
+});
+test('icon overrides apply on top of the chosen icon set in any key order', () => {
+  for (const raw of [{ iconSet: 'unicode', icons: { draft: 'D' } }, { icons: { draft: 'D' }, iconSet: 'unicode' }]) {
+    const config = parseConfig(raw);
+    expect(config.icons.draft).toBe('D');
+    expect(config.icons.open).toBe('\u25c9');
+  }
+});
+test('invalid icon set fails clearly', () => {
+  for (const iconSet of ['ascii', 'NerdFont', true, null]) {
+    expect(() => parseConfig({ iconSet })).toThrow('iconSet must be "nerdFont" or "unicode"');
+  }
 });
 
 
