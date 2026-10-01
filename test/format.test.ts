@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { defaults, formatPR, parseConfig } from '../src/format';
 import type { PRStatus } from '../src/github';
-const pr: PRStatus = { number: 42, url: 'https://github.com/o/r/pull/42', lifecycle: 'draft', checks: { passed: 2, failed: 1, pending: 0, total: 3 }, review: 'approved', threads: 0 };
+const pr: PRStatus = { number: 42, url: 'https://github.com/o/r/pull/42', lifecycle: 'draft', checks: { passed: 2, failed: 1, pending: 0, total: 3 }, review: 'approved', threads: 0, merge: null };
 test('keeps lifecycle, checks and review separate', () => {
   expect(formatPR(pr)).toEqual({ pr: '\uf4dd #42', pr_checks: '\uf467 2/3', pr_review: '\uf49e approved', pr_threads: '' });
 });
@@ -63,4 +63,13 @@ test('polling interval defaults to 60 seconds and validates bounds', () => {
   for (const pollSeconds of [0, -1, 14, 3601, 15.5, '60', null, true, NaN, Infinity]) {
     expect(() => parseConfig({ pollSeconds })).toThrow('pollSeconds must be an integer from 15 to 3600');
   }
+});
+
+test('merge state replaces the lifecycle icon', () => {
+  expect(defaults.icons).toMatchObject({ conflict: '\uf47f', queued: '\uf4db', ready: '\uf427' });
+  for (const merge of ['conflict', 'queued', 'ready'] as const) {
+    expect(formatPR({ ...pr, lifecycle: 'open', merge }).pr).toBe(`${defaults.icons[merge]} #42`);
+  }
+  const config = parseConfig({ icons: { ready: '' }, labels: { ready: 'ready' } });
+  expect(formatPR({ ...pr, lifecycle: 'open', merge: 'ready' }, config).pr).toBe('#42 ready');
 });

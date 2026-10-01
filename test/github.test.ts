@@ -157,7 +157,7 @@ describe("independent PR state", () => {
     test(`${lifecycle} retains checks, review and threads`, async () => {
       const { run } = fixture({ prs: [pr({ state, isDraft, reviewDecision: "APPROVED" })], pages: [page([false])] });
       expect(await lookupPR(cwd, run)).toEqual({ number: 42, url: pr().url, lifecycle,
-        checks: { passed: 0, failed: 0, pending: 0, total: 0 }, review: "approved", threads: 1 });
+        checks: { passed: 0, failed: 0, pending: 0, total: 0 }, review: "approved", threads: 1, merge: null });
     });
   }
   test("open PR wins over newer terminal; otherwise latest terminal wins", async () => {
@@ -197,6 +197,46 @@ describe("independent PR state", () => {
       expect(result?.review).toBe("approved");
       expect(result?.threads).toBe(0);
     }
+  });
+});
+
+describe("merge state", () => {
+  const queued = { data: { repository: { pullRequest: { mergeQueueEntry: { state: "QUEUED" },
+    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } };
+  const merge = async (overrides: Record<string, unknown>, pages?: unknown[]) =>
+    (await lookupPR(cwd, fixture({ prs: [pr(overrides)], pages }).run))?.merge;
+  test("conflicts take priority over every other merge state", async () => {
+    expect(await merge({ mergeable: "CONFLICTING", mergeStateStatus: "CLEAN" }, [queued])).toBe("conflict");
+    expect(await merge({ mergeable: "UNKNOWN", mergeStateStatus: "DIRTY" })).toBe("conflict");
+    expect(await merge({ isDraft: true, mergeable: "CONFLICTING" })).toBe("conflict");
+  });
+  test("merge queue entry or auto-merge means queued", async () => {
+    expect(await merge({ mergeStateStatus: "CLEAN" }, [queued])).toBe("queued");
+    expect(await merge({ mergeStateStatus: "BLOCKED", autoMergeRequest: { mergeMethod: "SQUASH" } })).toBe("queued");
+  });
+  test("clean merge state means ready", async () => {
+    expect(await merge({ mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" })).toBe("ready");
+  });
+  test("drafts are never queued or ready", async () => {
+    expect(await merge({ isDraft: true, mergeStateStatus: "CLEAN", autoMergeRequest: { mergeMethod: "SQUASH" } }, [queued])).toBeNull();
+  });
+  test("blocked, behind, unstable and unknown states have no merge state", async () => {
+    for (const mergeStateStatus of ["BLOCKED", "BEHIND", "UNSTABLE", "HAS_HOOKS", "UNKNOWN", undefined]) {
+      expect(await merge({ mergeable: "MERGEABLE", mergeStateStatus })).toBeNull();
+    }
+  });
+  test("terminal PRs have no merge state", async () => {
+    for (const state of ["MERGED", "CLOSED"]) {
+      expect(await merge({ state, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, [queued])).toBeNull();
+    }
+  });
+  test("requests merge state fields", async () => {
+    const { run, calls } = fixture();
+    await lookupPR(cwd, run);
+    const list = calls.find(args => args[1] === "pr" && args[2] === "list")!;
+    expect(list[list.indexOf("--json") + 1]).toContain("mergeable,mergeStateStatus,autoMergeRequest");
+    const graphql = calls.find(args => args[1] === "api")!;
+    expect(graphql.find(arg => arg.startsWith("query="))).toContain("mergeQueueEntry");
   });
 });
 

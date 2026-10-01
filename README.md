@@ -141,18 +141,18 @@ Defaults use lifecycle icons with the PR number (e.g. ` #6401`), icon + short
 
 | Token | Meaning |
 | --- | --- |
-| `$pr` | Number and lifecycle icon: open / draft / merged / closed |
+| `$pr` | Number and state icon: open / draft / merged / closed, or for open PRs conflict / queued / ready |
 | `$pr_checks` | Passed/total checks; failure takes precedence over pending; `no checks` for known zero |
 | `$pr_review` | Review decision, independent of checks and lifecycle |
 | `$pr_threads` | Unresolved review-thread count, across pages; known zero hidden by default |
 
-Check totals include GitHub status contexts and check runs; neutral/skipped runs count as passing. Unknown data displays `?`, not zero. Lifecycle never becomes “failed” because CI failed. Confirmed absent PRs and hidden fields clear the corresponding shared token keys. Unrelated token keys are untouched; another running reporter could overwrite the shared keys again.
+Check totals include GitHub status contexts and check runs; neutral/skipped runs count as passing. Unknown data displays `?`, not zero. Lifecycle never becomes “failed” because CI failed. An open PR's icon changes to conflict when GitHub reports merge conflicts (drafts included), to queued when it is in the merge queue or has auto-merge enabled, and to ready when GitHub reports it can merge cleanly now. Conflict wins over queued, which wins over ready; otherwise the lifecycle icon shows. Matching `labels` keys (`conflict`, `queued`, `ready`) are empty by default. Confirmed absent PRs and hidden fields clear the corresponding shared token keys. Unrelated token keys are untouched; another running reporter could overwrite the shared keys again.
 
 ## Icons
 
 Nerd Font icons are built in. A Nerd Font v3.4-compatible terminal font is required; there is no icon-style selector, detection, or fallback set. Individual `icons` overrides remain available, along with text labels and visibility settings.
 
-The built-in Octicons are: PR open `U+F407`, draft `U+F4DD`, merged `U+F419`, closed `U+F4DC`; checks passing `U+F42E`, failed `U+F467`, pending `U+F43A`; review approved `U+F49E`, changes requested `U+F440`, required `U+F4AF`.
+The built-in Octicons are: PR open `U+F407`, draft `U+F4DD`, merged `U+F419`, closed `U+F4DC`; merge conflict `U+F47F`, queued `U+F4DB`, ready `U+F427`; checks passing `U+F42E`, failed `U+F467`, pending `U+F43A`; review approved `U+F49E`, changes requested `U+F440`, required `U+F4AF`.
 
 Unknown checks/review and thread counts remain plain text. Glyph identifiers verified against [Nerd Fonts v3.4.0](https://github.com/ryanoasis/nerd-fonts/blob/v3.4.0/glyphnames.json).
 

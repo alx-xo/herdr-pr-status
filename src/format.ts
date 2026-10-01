@@ -8,13 +8,14 @@ export const defaults = {
   visible: { pr: true, pr_checks: true, pr_review: true, pr_threads: true },
   hideZeroThreads: true,
   labels: {
-    open: '', draft: '', merged: '', closed: '',
+    open: '', draft: '', merged: '', closed: '', conflict: '', queued: '', ready: '',
     approved: 'approved', changes_requested: 'changes', required: 'review',
     threads: 'threads', unknown: '?',
   },
   // Octicons from Nerd Fonts v3.4.0. A Nerd Font is required.
   icons: {
     open: '\uf407', draft: '\uf4dd', merged: '\uf419', closed: '\uf4dc',
+    conflict: '\uf47f', queued: '\uf4db', ready: '\uf427',
     passed: '\uf42e', failed: '\uf467', pending: '\uf43a',
     approved: '\uf49e', changes_requested: '\uf440', required: '\uf4af',
   },
@@ -54,7 +55,8 @@ export function formatPR(pr: PRStatus | null, config: Config = defaults): Tokens
   const tokens: Tokens = { pr: '', pr_checks: '', pr_review: '', pr_threads: '' };
   if (!pr) return tokens;
   const { labels, icons } = config;
-  tokens.pr = [icons[pr.lifecycle], `#${pr.number}`, labels[pr.lifecycle]].filter(Boolean).join(' ');
+  const state = pr.merge ?? pr.lifecycle;
+  tokens.pr = [icons[state], `#${pr.number}`, labels[state]].filter(Boolean).join(' ');
   const checks = pr.checks;
   tokens.pr_checks = checks === null ? `checks ${labels.unknown}` : checks.total === 0 ? 'no checks'
     : `${checks.failed > 0 ? icons.failed : checks.pending > 0 ? icons.pending : icons.passed} ${checks.passed}/${checks.total}`.trim();

@@ -10,6 +10,8 @@ export interface PRStatus {
   checks: { passed: number; failed: number; pending: number; total: number } | null;
   review: "approved" | "changes_requested" | "required" | null;
   threads: number | null;
+  /** Open PRs only: conflicts block merging, queued is about to land, ready can merge now. */
+  merge: "conflict" | "queued" | "ready" | null;
 }
 
 export type Runner = (argv: string[], cwd?: string) => Promise<string>;
@@ -84,6 +86,7 @@ function checks(value: unknown): PRStatus["checks"] {
 const threadQuery = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      mergeQueueEntry { state }
       reviewThreads(first: 100, after: $cursor) {
         nodes { isResolved }
         pageInfo { hasNextPage endCursor }
@@ -92,11 +95,14 @@ const threadQuery = `query($owner: String!, $name: String!, $number: Int!, $curs
   }
 }`;
 
-async function unresolvedThreads(run: Runner, cwd: string, repoURL: string, number: number): Promise<number | null> {
+// The merge queue is only visible through GraphQL, so it rides along with the
+// first page of review threads.
+async function threadsAndQueue(run: Runner, cwd: string, repoURL: string, number: number): Promise<{ threads: number | null; queued: boolean }> {
   const repo = repository(repoURL);
   const [owner, name] = repo.name.split("/");
   let cursor: string | undefined;
   let total = 0;
+  let queued = false;
   const seen = new Set<string>();
   do {
     const args = ["gh", "api", "graphql", "--hostname", repo.host, "-f", `query=${threadQuery}`,
@@ -104,28 +110,29 @@ async function unresolvedThreads(run: Runner, cwd: string, repoURL: string, numb
     if (cursor) args.push("-f", `cursor=${cursor}`);
     const response = object(JSON.parse(await run(args, cwd)));
     if (response.errors != null) throw new Error("GitHub review thread query failed");
-    if (response.data == null) return null;
+    if (response.data == null) return { threads: null, queued };
     const repositoryData = object(response.data).repository;
-    if (repositoryData == null) return null;
+    if (repositoryData == null) return { threads: null, queued };
     const pr = object(repositoryData).pullRequest;
-    if (pr == null) return null;
+    if (pr == null) return { threads: null, queued };
+    if (!cursor) queued = object(pr).mergeQueueEntry != null;
     const threads = object(pr).reviewThreads;
-    if (threads == null) return null;
+    if (threads == null) return { threads: null, queued };
     const connection = object(threads);
-    if (!Array.isArray(connection.nodes)) return null;
+    if (!Array.isArray(connection.nodes)) return { threads: null, queued };
     for (const node of connection.nodes) {
-      if (node == null || typeof object(node).isResolved !== "boolean") return null;
+      if (node == null || typeof object(node).isResolved !== "boolean") return { threads: null, queued };
       if (!object(node).isResolved) total++;
     }
     const page = object(connection.pageInfo);
-    if (page.hasNextPage === false) return total;
+    if (page.hasNextPage === false) return { threads: total, queued };
     if (page.hasNextPage !== true || typeof page.endCursor !== "string" || !page.endCursor || seen.has(page.endCursor)) {
       throw new Error("Invalid review thread pagination");
     }
     cursor = page.endCursor;
     seen.add(cursor);
   } while (cursor);
-  return total;
+  return { threads: total, queued };
 }
 
 /** A positively identified destination where GitHub PR status does not apply. */
@@ -261,7 +268,7 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
         || owner.includes("/") || parent.name.includes("/")) throw new Error("Missing GitHub parent repository identity");
     baseURL = `https://${headRepo.host}/${owner}/${parent.name}`;
   }
-  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision,reviewRequests";
+  const fields = "number,url,state,isDraft,headRefName,headRepository,headRepositoryOwner,updatedAt,statusCheckRollup,reviewDecision,reviewRequests,mergeable,mergeStateStatus,autoMergeRequest";
   const matches = new Map<string, ObjectValue>();
   // A fork can have PRs targeting itself as well as its parent. Query both:
   // an empty parent alone does not prove that this branch has no PR.
@@ -294,7 +301,7 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
     throw new Error("Invalid pull request details");
   }
   const lifecycle = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft" : "open";
-  const result: PRStatus = { number: pr.number, url: pr.url, lifecycle, checks: null, review: null, threads: null };
+  const result: PRStatus = { number: pr.number, url: pr.url, lifecycle, checks: null, review: null, threads: null, merge: null };
   // pr list exposes raw historical runs, including superseded cancellations.
   // gh pr checks paginates contexts and selects the newest run per check name,
   // workflow and event. JSON mode exits successfully even for failed checks.
@@ -310,6 +317,13 @@ async function queryPR(cwd: string, run: Runner, { head, headRepo }: LookupConte
     // GitHub leaves reviewDecision empty when no branch rule requires review,
     // e.g. a stacked PR. Requested reviewers still mean it awaits review.
     : !pr.reviewDecision && Array.isArray(pr.reviewRequests) && pr.reviewRequests.length > 0 ? "required" : null;
-  result.threads = await unresolvedThreads(run, cwd, String(pr.lookupBaseURL), pr.number);
+  const { threads, queued } = await threadsAndQueue(run, cwd, String(pr.lookupBaseURL), pr.number);
+  result.threads = threads;
+  if (pr.state === "OPEN") {
+    result.merge = pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY" ? "conflict"
+      : pr.isDraft ? null
+      : queued || pr.autoMergeRequest != null ? "queued"
+      : pr.mergeStateStatus === "CLEAN" ? "ready" : null;
+  }
   return result;
 }
