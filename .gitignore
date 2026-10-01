@@ -1,3 +1,16 @@
 node_modules/
 dist/
 .DS_Store
+
+# Agent working notes, not committed
+docs/research/
+docs/spec/
+docs/specs/
+docs/plan/
+docs/plans/
+docs/adr/
+docs/agents/
+docs/superpowers/
+.scratch/
+CONTEXT.md
+CONTEXT-MAP.md
