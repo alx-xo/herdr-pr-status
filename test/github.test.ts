@@ -1,22 +1,28 @@
-import { describe, expect, test } from "bun:test";
-import { lookupPR, type Runner } from "../src/github";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { clearMergeQueueSupport, lookupPR, type Runner } from "../src/github";
 import { formatPR } from "../src/format";
 
 const cwd = "/checkout with spaces";
+// Schema checks are remembered per server for the whole process.
+beforeEach(clearMergeQueueSupport);
 const pr = (overrides: Record<string, unknown> = {}) => ({
   number: 42, url: `https://github.com/base/project/pull/${overrides.number ?? 42}`, state: "OPEN", isDraft: false,
   headRefName: "remote-feature", headRepository: { name: "project", nameWithOwner: "" },
   headRepositoryOwner: { login: "alice" }, updatedAt: "2026-01-01T00:00:00Z",
   statusCheckRollup: [], reviewDecision: "", ...overrides,
 });
-const page = (resolved: boolean[], hasNextPage = false, endCursor: string | null = null) => ({
-  data: { repository: { pullRequest: { reviewThreads: {
+const page = (resolved: boolean[], hasNextPage = false, endCursor: string | null = null, pullRequest: Record<string, unknown> = {}) => ({
+  data: { repository: { pullRequest: { ...pullRequest, reviewThreads: {
     nodes: resolved.map(isResolved => ({ isResolved })), pageInfo: { hasNextPage, endCursor },
   } } } },
 });
+const queuedPage = (resolved: boolean[] = []) => page(resolved, false, null, { mergeQueueEntry: { state: "QUEUED" } });
+const isSchemaQuery = (args: string[]) => args.some(arg => arg.includes("__type"));
+const queryText = (args: string[]) => args.find(arg => arg.startsWith("query="));
 function fixture(options: {
   branch?: string; tracking?: string; remote?: string; prs?: unknown;
-  pages?: unknown[]; currentChecks?: unknown; localPRs?: unknown; repo?: unknown; fetchRemote?: string; fail?: "list" | "checks" | "threads" | "git" | "repo";
+  pages?: unknown[]; currentChecks?: unknown; localPRs?: unknown; repo?: unknown; fetchRemote?: string; fail?: "list" | "checks" | "threads" | "git" | "repo" | "schema" | "schema-errors";
+  queueField?: boolean;
 } = {}) {
   const calls: string[][] = [];
   let pageIndex = 0;
@@ -61,10 +67,20 @@ function fixture(options: {
         state: c.__typename === "StatusContext" ? c.state : c.status === "COMPLETED" ? c.conclusion : c.status,
       })));
     }
+    if (command === "gh api graphql" && isSchemaQuery(args)) {
+      if (options.fail === "schema") throw new Error("schema failure");
+      if (options.fail === "schema-errors") return JSON.stringify({ errors: [{ message: "denied" }], data: null });
+      const fields = ["number", "reviewThreads", ...(options.queueField === false ? [] : ["mergeQueueEntry"])];
+      return JSON.stringify({ data: { __type: { fields: fields.map(name => ({ name })) } } });
+    }
     if (command === "gh api graphql") {
       if (options.fail === "threads") throw new Error("threads failure");
       const next = (options.pages ?? [page([])])[pageIndex++];
       if (next === undefined) throw new Error("Unexpected extra page");
+      // Like GitHub: an unknown field fails the whole query, and only
+      // requested fields come back.
+      if (!queryText(args)!.includes("mergeQueueEntry")) return JSON.stringify(next, (key, value) => key === "mergeQueueEntry" ? undefined : value);
+      if (options.queueField === false) return JSON.stringify({ errors: [{ message: "Field 'mergeQueueEntry' doesn't exist on type 'PullRequest'" }] });
       return JSON.stringify(next);
     }
     throw new Error(`Unexpected command: ${args.join(" ")}`);
@@ -201,8 +217,7 @@ describe("independent PR state", () => {
 });
 
 describe("merge state", () => {
-  const queued = { data: { repository: { pullRequest: { mergeQueueEntry: { state: "QUEUED" },
-    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } };
+  const queued = queuedPage();
   const merge = async (overrides: Record<string, unknown>, pages?: unknown[]) =>
     (await lookupPR(cwd, fixture({ prs: [pr(overrides)], pages }).run))?.merge;
   test("conflicts take priority over every other merge state", async () => {
@@ -235,8 +250,6 @@ describe("merge state", () => {
     await lookupPR(cwd, run);
     const list = calls.find(args => args[1] === "pr" && args[2] === "list")!;
     expect(list[list.indexOf("--json") + 1]).toContain("mergeable,mergeStateStatus,autoMergeRequest");
-    const graphql = calls.find(args => args[1] === "api")!;
-    expect(graphql.find(arg => arg.startsWith("query="))).toContain("mergeQueueEntry");
   });
 });
 
@@ -253,6 +266,41 @@ for (const count of [99, 100, 101]) {
     expect(formatPR(result).pr_checks).toContain(`${count}/${count}`);
   });
 }
+
+describe("merge queue support", () => {
+  const enterprise = (host: string, options: Parameters<typeof fixture>[0] = {}) => fixture({
+    remote: `https://${host}/alice/project.git`,
+    repo: { nameWithOwner: "alice/project", url: `https://${host}/alice/project`, parent: { name: "project", owner: { login: "base" } } },
+    prs: [pr({ url: `https://${host}/base/project/pull/42`, mergeStateStatus: "CLEAN" })], localPRs: [], ...options,
+  });
+  const schemaQueries = (calls: string[][]) => calls.filter(isSchemaQuery);
+  test("github.com shows queued PRs without checking the schema", async () => {
+    const { run, calls } = fixture({ pages: [queuedPage()] });
+    expect((await lookupPR(cwd, run))?.merge).toBe("queued");
+    expect(schemaQueries(calls)).toHaveLength(0);
+  });
+  test("Enterprise server with merge queue support shows queued PRs", async () => {
+    expect((await lookupPR(cwd, enterprise("ghe.example", { pages: [queuedPage()] }).run))?.merge).toBe("queued");
+  });
+  test("Enterprise server without merge queue support keeps threads and merge state", async () => {
+    const result = await lookupPR(cwd, enterprise("ghe.example", { queueField: false, pages: [page([false, true])] }).run);
+    expect(result).toMatchObject({ threads: 1, merge: "ready" });
+  });
+  test("schema is checked once per server", async () => {
+    const first = enterprise("ghe.example", { queueField: false });
+    await lookupPR(cwd, first.run);
+    const second = enterprise("ghe.example", { queueField: false });
+    expect((await lookupPR(cwd, second.run))?.threads).toBe(0);
+    expect(schemaQueries([...first.calls, ...second.calls])).toHaveLength(1);
+  });
+  for (const fail of ["schema", "schema-errors"] as const) {
+    test(`${fail} failure still counts threads and checks again next lookup`, async () => {
+      const failed = enterprise("ghe.example", { fail, queueField: false, pages: [page([false])] });
+      expect((await lookupPR(cwd, failed.run))?.threads).toBe(1);
+      expect((await lookupPR(cwd, enterprise("ghe.example", { pages: [queuedPage()] }).run))?.merge).toBe("queued");
+    });
+  }
+});
 
 describe("review threads", () => {
   test("counts unresolved threads across every page using base repository", async () => {
@@ -381,8 +429,9 @@ describe("canonical GitHub host identity", () => {
       for (const args of calls.filter(args => args[0] === "gh" && args[1] === "pr")) {
         expect(args[args.indexOf("--repo") + 1]).toMatch(/^https:\/\/ghe\.example\//);
       }
-      const graphql = calls.find(args => args[1] === "api")!;
-      expect(graphql[graphql.indexOf("--hostname") + 1]).toBe("ghe.example");
+      for (const args of calls.filter(args => args[0] === "gh" && args[1] === "api")) {
+        expect(args[args.indexOf("--hostname") + 1]).toBe("ghe.example");
+      }
     });
   }
   test("does not infer SSH aliases or substitute the API host", async () => {
