@@ -83,10 +83,10 @@ function checks(value: unknown): PRStatus["checks"] {
   return result;
 }
 
-const threadQuery = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+const reviewThreadQuery = (includeMergeQueue: boolean) => `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      mergeQueueEntry { state }
+      ${includeMergeQueue ? "mergeQueueEntry { state }" : ""}
       reviewThreads(first: 100, after: $cursor) {
         nodes { isResolved }
         pageInfo { hasNextPage endCursor }
@@ -95,21 +95,59 @@ const threadQuery = `query($owner: String!, $name: String!, $number: Int!, $curs
   }
 }`;
 
+/** One GraphQL request. A response carrying errors fails with `failure`. */
+async function graphql(run: Runner, cwd: string, host: string, query: string, variables: string[], failure: string): Promise<ObjectValue> {
+  const response = object(JSON.parse(await run(["gh", "api", "graphql", "--hostname", host, "-f", `query=${query}`, ...variables], cwd)));
+  if (response.errors != null) throw new Error(failure);
+  return response;
+}
+
+// Older GitHub Enterprise Server versions have no merge queue, and GraphQL
+// rejects a whole query that asks for an unknown field. Check each server's
+// schema once; github.com always has it. A failed check is not remembered:
+// that lookup leaves the field out and the next lookup checks again.
+const pullRequestFieldsQuery = 'query { __type(name: "PullRequest") { fields(includeDeprecated: true) { name } } }';
+const mergeQueueSupport = new Map<string, Promise<boolean>>();
+async function schemaHasMergeQueue(run: Runner, cwd: string, host: string): Promise<boolean> {
+  const response = await graphql(run, cwd, host, pullRequestFieldsQuery, [], "GitHub schema query failed");
+  const fields = object(object(response.data).__type).fields;
+  if (!Array.isArray(fields)) throw new Error("Unexpected GitHub schema response");
+  return fields.some(field => object(field).name === "mergeQueueEntry");
+}
+async function supportsMergeQueue(run: Runner, cwd: string, host: string): Promise<boolean> {
+  if (host === "github.com") return true;
+  let check = mergeQueueSupport.get(host);
+  if (!check) {
+    check = schemaHasMergeQueue(run, cwd, host);
+    mergeQueueSupport.set(host, check);
+  }
+  try {
+    return await check;
+  } catch {
+    if (mergeQueueSupport.get(host) === check) mergeQueueSupport.delete(host);
+    return false;
+  }
+}
+
+/** Forget remembered schema checks, so tests start from a clean slate. */
+export function clearMergeQueueSupport(): void {
+  mergeQueueSupport.clear();
+}
+
 // The merge queue is only visible through GraphQL, so it rides along with the
 // first page of review threads.
 async function threadsAndQueue(run: Runner, cwd: string, repoURL: string, number: number): Promise<{ threads: number | null; queued: boolean }> {
   const repo = repository(repoURL);
   const [owner, name] = repo.name.split("/");
+  const query = reviewThreadQuery(await supportsMergeQueue(run, cwd, repo.host));
   let cursor: string | undefined;
   let total = 0;
   let queued = false;
   const seen = new Set<string>();
   do {
-    const args = ["gh", "api", "graphql", "--hostname", repo.host, "-f", `query=${threadQuery}`,
-      "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${number}`];
-    if (cursor) args.push("-f", `cursor=${cursor}`);
-    const response = object(JSON.parse(await run(args, cwd)));
-    if (response.errors != null) throw new Error("GitHub review thread query failed");
+    const variables = ["-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${number}`];
+    if (cursor) variables.push("-f", `cursor=${cursor}`);
+    const response = await graphql(run, cwd, repo.host, query, variables, "GitHub review thread query failed");
     if (response.data == null) return { threads: null, queued };
     const repositoryData = object(response.data).repository;
     if (repositoryData == null) return { threads: null, queued };
