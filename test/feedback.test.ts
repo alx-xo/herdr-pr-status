@@ -52,7 +52,7 @@ for (const change of [{ branch: 'other' }, { repo: 'other/repo' }]) {
     f.set({ ...change, error: 'HTTP 503' });
     f.onLookup(() => expect(f.published[0]).toContain('--clear-token'));
     const [result] = await f.refresh();
-    expect(result).toMatchObject({ freshness: 'unavailable', category: 'service', tokens: { pr: '⚠', pr_checks: '', pr_review: '', pr_threads: '' } });
+    expect(result).toMatchObject({ freshness: 'unavailable', category: 'service', tokens: { pr: '', pr_checks: '', pr_review: '', pr_threads: '' } });
     expect(result!.lastSuccessAt).toBeUndefined();
   });
 }
@@ -85,7 +85,7 @@ test('detached branch invalidates prior data and reports an unresolved failure',
   await f.refresh();
   f.set({ branch: '' });
   const [result] = await f.refresh();
-  expect(result).toMatchObject({ category: 'unresolved', freshness: 'unavailable', tokens: { pr: '⚠' } });
+  expect(result).toMatchObject({ category: 'unresolved', freshness: 'unavailable', tokens: { pr: '' } });
   expect(result!.lastSuccessAt).toBeUndefined();
   expect(f.state.size).toBe(0);
 });
@@ -112,3 +112,18 @@ test('initial metadata publication failure is not misreported as Git resolution 
   };
   expect((await refresh(defaults, false, run, targets))[0]).toMatchObject({ category: 'unknown' });
 });
+
+for (const confirmedAbsent of [false, true]) {
+  test(`lookup failure without a known PR stays quiet (confirmed absence: ${confirmedAbsent})`, async () => {
+    const f = fixture();
+    if (confirmedAbsent) {
+      f.set({ empty: true });
+      await f.refresh();
+    }
+    f.set({ error: 'HTTP 503' });
+    const [result] = await f.refresh();
+    expect(result).toMatchObject({ status: 'error', category: 'service',
+      tokens: { pr: '', pr_checks: '', pr_review: '', pr_threads: '' } });
+    expect(f.published.at(-1)).toContain('--clear-token');
+  });
+}

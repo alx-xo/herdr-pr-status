@@ -92,7 +92,8 @@ export async function refresh(config: Config, preview: boolean, run: Runner = ru
     const previous = context !== undefined && state.get(id)?.context === context ? state.get(id) : undefined;
     const refreshedAt = new Date().toISOString();
     const tokens = formatPR(problem ? previous?.pr ?? null : pr, config);
-    if (problem) tokens.pr = [tokens.pr, '⚠'].filter(Boolean).join(' ');
+    // Sidebar warnings only qualify a known PR; lookup failures remain in diagnostics.
+    if (problem && previous?.pr) tokens.pr = [tokens.pr, '⚠'].filter(Boolean).join(' ');
     const result: RefreshResult = { ...base, cwd, refreshedAt, tokens,
       status: problem ? 'error' : preview ? 'preview' : 'published',
       freshness: problem ? previous ? 'stale' : 'unavailable' : 'fresh',
