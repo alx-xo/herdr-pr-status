@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createServer, type Socket } from 'node:net';
+import { createConnection, createServer, type Socket } from 'node:net';
 import { defaults } from '../src/format';
 import { control, status, enabled, pollLoop, type CycleState, type Session } from '../src/polling';
 import { serialized, tryLock } from '../src/locking';
@@ -238,6 +238,10 @@ if(tool==='herdr') {
     json({result:{plugins:[{plugin_id:'alx-xo.pr-status',enabled:true}]}});
   }
   else if(args[0]==='workspace' && args[1]==='list') {
+    if(existsSync(dir+'/fail-workspace-list') && !existsSync(dir+'/workspace-list-failed')) {
+      writeFileSync(dir+'/workspace-list-failed','');
+      await gate('release-workspace-error');json({result:{}});process.exit(0);
+    }
     if(existsSync(dir+'/observed-new')) log('observed','new');
     json({result:{workspaces:Array.from({length:existsSync(dir+'/workspace-count')?Number(readFileSync(dir+'/workspace-count','utf8')):1},(_,i)=>({workspace_id:'w'+(i+1),label:existsSync(dir+'/workspace-label')?readFileSync(dir+'/workspace-label','utf8'):'repo',focused:false,worktree:{checkout_path:repo}}))}});
   } else if(args[1]==='report-metadata') {
@@ -508,6 +512,174 @@ test('oversized control responses report an explicit limit, not a startup state'
   } finally { release?.(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
 });
 
+
+async function submitAndDisconnect(endpoint: { port: number; token: string }, command: 'refresh' | 'preview'): Promise<void> {
+  const client = createConnection({ host: '127.0.0.1', port: endpoint.port });
+  try {
+    // TCP delivers the frame before EOF. With allowHalfOpen=false, the server's
+    // EOF confirms frame processing, not successful completion. Tests separately
+    // verify that admitted work remains owned after this client disconnects.
+    await new Promise<void>((resolve, reject) => {
+      client.setTimeout(2000, () => client.destroy(new Error('Queued admission timed out')));
+      client.on('error', reject);
+      client.on('end', resolve);
+      client.on('connect', () => client.end(`${endpoint.token} ${command}\n`));
+      client.resume();
+    });
+  } finally { client.destroy(); }
+}
+
+test('stop drains a live manual refresh before releasing the worker lease or restarting', async () => {
+  const f = await checkoutFixture('lock');
+  let manual: Promise<unknown> | undefined;
+  let restart: Promise<unknown> | undefined;
+  try {
+    const original = await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles === 1);
+    const sessionDir = join(f.dir, (await readdir(f.dir)).find(name => name.startsWith('session-'))!);
+    await f.release('gate-requests');
+    manual = f.cli('refresh');
+    await f.until(async () => (await f.events('gate')).includes('release-request-1'));
+    expect((await f.cli('stop')).state).toBe('stopping');
+    // Herdr subscription teardown proves shutdown has progressed beyond the
+    // stop response, while the manual lookup remains gated.
+    await f.until(async () => f.connections.size === 0);
+    expect(await f.cli('status')).toMatchObject({ running: true });
+    const released = tryLock(join(sessionDir, 'worker.lock'));
+    released?.();
+    expect(released).toBeUndefined();
+    restart = f.cli('start');
+    await f.release('release-request-1');
+    expect(await manual).toMatchObject([{ freshness: 'fresh', workspace: 'w1', tokens: { pr: expect.stringContaining('#101') } }]);
+    expect(await restart).not.toMatchObject({ startedAt: original.startedAt });
+    await f.until(async () => (await f.events('gate')).includes('release-request-2'));
+    // Read the shared boundary log: awaiting the clients in order would not
+    // prove that the old publication preceded the replacement lookup.
+    const timeline = (await readFile(join(f.dir, 'events'), 'utf8')).trim().split('\n')
+      .map(line => JSON.parse(line) as { kind: string; value: string | Publication });
+    const manualGate = timeline.findIndex(event => event.kind === 'gate' && event.value === 'release-request-1');
+    const replacementGate = timeline.findIndex(event => event.kind === 'gate' && event.value === 'release-request-2');
+    const manualPublication = timeline.findIndex((event, index) => index > manualGate && event.kind === 'published'
+      && typeof event.value !== 'string' && event.value.workspace === 'w1' && event.value.tokens.pr?.includes('#101'));
+    expect(manualPublication).toBeGreaterThan(manualGate);
+    expect(manualPublication).toBeLessThan(replacementGate);
+    await f.release('release-request-2');
+    await f.until(async () => (await f.cli('status')).cycles === 1);
+    await f.cli('stop');
+    await f.until(async () => !(await f.cli('status')).running);
+    expect(await f.cli('status')).toMatchObject({ running: false, state: 'stopped' });
+  } finally {
+    await f.release('release-request-1');
+    await f.release('release-request-2');
+    await Promise.allSettled([manual, restart]);
+    await f.cleanup();
+  }
+}, 15000);
+
+test('stop drains queued refresh and preview requests but rejects late requests on existing clients', async () => {
+  const f = await checkoutFixture('lock');
+  const pending: Promise<Record<string, unknown>>[] = [];
+  const clients: Socket[] = [];
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles === 1);
+    const dir = join(f.dir, (await readdir(f.dir)).find(name => name.startsWith('session-'))!);
+    const s: Session = { dir, socket: f.env.HERDR_SOCKET_PATH, identity: '', control: join(dir, 'control.json') };
+    const endpoint = JSON.parse(await readFile(s.control, 'utf8'));
+    await f.release('gate-requests');
+    pending.push(control(s, 'refresh'));
+    await f.until(async () => (await f.events('gate')).includes('release-request-1'));
+    await submitAndDisconnect(endpoint, 'refresh');
+    await submitAndDisconnect(endpoint, 'preview');
+    const late = [];
+    for (const command of ['refresh', 'preview']) {
+      const client = createConnection({ host: '127.0.0.1', port: endpoint.port });
+      clients.push(client);
+      await new Promise<void>((resolve, reject) => { client.once('connect', resolve); client.once('error', reject); });
+      // Authenticate the request prefix now, but complete its frame after stop.
+      client.write(`${endpoint.token} ${command}`);
+      late.push(new Promise<Record<string, unknown>>((resolve, reject) => {
+        let response = '';
+        client.on('data', data => { response += data.toString(); });
+        client.on('error', reject);
+        client.on('end', () => {
+          try { resolve(JSON.parse(response)); } catch (error) { reject(error); }
+        });
+      }));
+    }
+    await f.cli('stop');
+    for (const client of clients) client.write('\n');
+    const rejected = await Promise.race([Promise.all(late), Bun.sleep(1000).then(() => 'timed out')]);
+    expect(rejected).toEqual([
+      { error: 'Poller is stopping; retry after shutdown' },
+      { error: 'Poller is stopping; retry after shutdown' },
+    ]);
+    for (let i = 1; i <= 3; i++) {
+      await f.until(async () => (await f.events('gate')).includes(`release-request-${i}`));
+      const released = tryLock(join(dir, 'worker.lock'));
+      released?.();
+      expect(released).toBeUndefined();
+      await f.release(`release-request-${i}`);
+    }
+    for (const result of await Promise.all(pending)) {
+      expect(result).toMatchObject({ results: [{ freshness: 'fresh', workspace: 'w1', tokens: { pr: expect.stringContaining('#101') } }] });
+    }
+    await f.until(async () => !(await f.cli('status')).running);
+    // Initial poll plus both refreshes publish; preview must not publish.
+    const publications = (await f.published()).filter(item => Object.values(item.tokens).some(Boolean));
+    expect(publications).toHaveLength(3);
+    for (const item of publications) {
+      expect(item).toMatchObject({ workspace: 'w1', tokens: { pr: expect.stringContaining('#101') } });
+    }
+    expect(await f.cli('status')).toMatchObject({ running: false, state: 'stopped' });
+  } finally {
+    for (const client of clients) client.destroy();
+    for (let i = 1; i <= 5; i++) await f.release(`release-request-${i}`);
+    await Promise.allSettled(pending);
+    await f.cleanup();
+  }
+}, 15000);
+
+test('stop drains remaining requests after an accepted refresh returns an error', async () => {
+  const f = await checkoutFixture('lock');
+  let failed: Promise<Record<string, unknown>> | undefined;
+  try {
+    await f.cli('start');
+    await f.until(async () => (await f.cli('status')).cycles === 1);
+    const dir = join(f.dir, (await readdir(f.dir)).find(name => name.startsWith('session-'))!);
+    const s: Session = { dir, socket: f.env.HERDR_SOCKET_PATH, identity: '', control: join(dir, 'control.json') };
+    const endpoint = JSON.parse(await readFile(s.control, 'utf8'));
+    await f.release('fail-workspace-list');
+    await f.release('gate-requests');
+    failed = control(s, 'refresh');
+    await f.until(async () => (await f.events('gate')).includes('release-workspace-error'));
+    await submitAndDisconnect(endpoint, 'refresh');
+    expect((await f.cli('stop')).state).toBe('stopping');
+    await f.release('release-workspace-error');
+    // Invalid workspace discovery rejects the operation itself, rather than
+    // returning a workspace error result. The tracked task catches this error.
+    expect(await failed).toEqual({ error: 'Invalid Herdr workspace list' });
+    await f.until(async () => (await f.events('gate')).includes('release-request-1'));
+    expect(await f.cli('status')).toMatchObject({ running: true });
+    const released = tryLock(join(dir, 'worker.lock'));
+    released?.();
+    expect(released).toBeUndefined();
+    await f.release('release-request-1');
+    await f.until(async () => !(await f.cli('status')).running);
+    // The initial poll and the remaining successful refresh both published.
+    const publications = (await f.published()).filter(item => Object.values(item.tokens).some(Boolean));
+    expect(publications).toHaveLength(2);
+    for (const item of publications) {
+      expect(item).toMatchObject({ workspace: 'w1', tokens: { pr: expect.stringContaining('#101') } });
+    }
+    expect(await f.cli('status')).toMatchObject({ running: false, state: 'stopped' });
+  } finally {
+    await f.release('release-workspace-error');
+    await f.release('release-request-1');
+    await Promise.allSettled([failed]);
+    await f.cleanup();
+  }
+}, 15000);
 
 test('background, manual and preview refreshes share one runtime lease', async () => {
   const f = await checkoutFixture('lock');
