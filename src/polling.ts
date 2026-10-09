@@ -245,6 +245,7 @@ export async function worker(s: Session): Promise<void> {
   const save = async () => {
     state.nextRetryAt = scheduler.nextRetryAt > Date.now() ? new Date(scheduler.nextRetryAt).toISOString() : undefined;
     await writeFile(join(s.dir, 'status.json'), JSON.stringify(statusSnapshot(state)), { mode: 0o600 }); };
+  const manualRequests = new Set<Promise<void>>();
   const stop = () => { active = false; state.state = 'stopping'; wake(); };
   const token = randomUUID();
   const server = createServer(client => {
@@ -262,8 +263,11 @@ export async function worker(s: Session): Promise<void> {
       handled = true;
       if (cmd === 'stop') stop();
       if (cmd === 'refresh' || cmd === 'preview') {
+        // Closing the listener does not close existing clients. Freeze admission
+        // as soon as stop begins, including authenticated clients already connected.
+        if (!active) { client.end(controlResponse({ error: 'Poller is stopping; retry after shutdown' })); return; }
         client.setTimeout(120000);
-        void loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview', scheduler)).then(async results => {
+        const task = loadConfig().then(config => manualRefresh(s, config, memory, cmd === 'preview', scheduler)).then(async results => {
           if (cmd === 'refresh') {
             recordResults(results);
             for (const result of results) if (result.stale) scheduler.requeue(result.workspace);
@@ -271,7 +275,11 @@ export async function worker(s: Session): Promise<void> {
             await save();
           }
           client.end(controlResponse({ results }));
-        }).catch(error => client.end(controlResponse({ error: message(error) }))).finally(() => save().catch(() => {}));
+        }).catch(error => { client.end(controlResponse({ error: message(error) })); }).finally(async () => {
+          await save().catch(() => {});
+          manualRequests.delete(task);
+        });
+        manualRequests.add(task);
         return;
       }
       client.end(controlResponse(cmd === 'stop' || cmd === 'status' ? statusSnapshot(state) : { error: 'Unknown command' }));
@@ -400,6 +408,9 @@ export async function worker(s: Session): Promise<void> {
   } finally {
     stop(); if (timer) clearInterval(timer); connection?.destroy();
     server.close();
+    // Keep the worker lease until admitted refreshes/previews (including those
+    // queued on refresh.lock) finish publication, responses and status writes.
+    await Promise.allSettled(manualRequests);
     state.running = false; state.state = 'stopped'; delete state.nextRunAt;
     await save().catch(() => {});
     await unlink(s.control).catch(() => {});
