@@ -1,0 +1,58 @@
+name: Bug report
+description: Report incorrect PR status, missing badges, or another plugin problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. This is a public issue: redact tokens,
+        credentials, private repository URLs, sensitive branch names, and local
+        paths from any text, logs, or screenshots you share.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your OS, Herdr version, and plugin version or commit. Write "unknown" if you cannot find a version.
+      placeholder: |
+        OS and version:
+        Herdr version:
+        Plugin version or commit:
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened, and what did you expect?
+      description: Describe the sidebar behavior or error. If relevant, explain how it differs from the PR on GitHub. Redacted screenshots are welcome.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which workspaces are affected?
+      options:
+        - One workspace
+        - Several workspaces, but not all
+        - All workspaces
+        - Not sure / not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Describe what you were doing when it happened and whether it happens consistently. If you do not know how to reproduce it, say so.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant status or logs (optional)
+      description: |
+        From a terminal inside the affected Herdr session, run:
+        `herdr plugin action invoke alx-xo.pr-status.status`
+        then `herdr plugin log list --plugin alx-xo.pr-status --limit 3`.
+        Wait for the status action to complete; an accepted action is not its result.
+        Share only relevant, redacted output. Do not paste credentials, environment
+        dumps, or your full configuration. Skip this if you cannot safely share it.
+      render: text
