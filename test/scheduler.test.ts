@@ -330,6 +330,11 @@ test('manual publication resets failures without stale polling completion undoin
   s.complete(62001, defaults, true);
   expect(s.take(91999, defaults)).toBeUndefined();
   expect(s.take(92000, defaults)?.workspace_id).toBe('a');
+});
+
+test('new polling attempts count failures after manual recovery', () => {
+  const s = new Scheduler(); s.reconcile([a]); s.observe('a', 'main');
+  s.take(92000, defaults);
   // A queued poll consumes after manual recovery: its own failure must count.
   s.manualSuccess('a', 92001);
   s.beginAttempt('a'); s.consume('a', 'main'); s.complete(93000, defaults, true);

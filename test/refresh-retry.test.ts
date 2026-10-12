@@ -151,12 +151,11 @@ for (const [pollError, retryAt] of [
   });
 }
 
-for (const [error, retryAt, manual] of [
-  ['network connection failed', 15001, false],
-  ['HTTP 429 rate limit\nRetry-After: 120', 120001, false],
-  ['HTTP 429 rate limit\nRetry-After: 120', 120001, true],
+for (const [error, retryAt] of [
+  ['network connection failed', 15001],
+  ['HTTP 429 rate limit\nRetry-After: 120', 120001],
 ] as const) {
-  test(`queued refresh defers to the unchanged shared deadline (${manual ? 'manual' : 'automatic'}): ${error.split('\n')[0]}`, async () => {
+  test(`queued automatic refresh defers to the unchanged shared deadline: ${error.split('\n')[0]}`, async () => {
     const scheduler = new Scheduler(() => 0);
     const config = { ...defaults, pollSeconds: 3600, activePollSeconds: 3600 };
     scheduler.reconcile([{ workspace_id: 'a', label: 'A', focused: true }]);
@@ -172,7 +171,7 @@ for (const [error, retryAt, manual] of [
       await retryRefresh(scheduler, run => run(['gh', 'api']), async () => {
         calls++;
         return 'ok';
-      }, manual, () => now);
+      }, false, () => now);
     });
     const failed = poll.catch(error => error);
     await expect(retryRefresh(scheduler, run => run(['gh', 'api']), async () => {
@@ -193,35 +192,32 @@ for (const [error, retryAt, manual] of [
   });
 }
 
-for (const manualPublication of [false, true]) {
-  test(`lease acquisition owns a preflight failure after manual ${manualPublication ? 'publication' : 'auth recovery'}`, async () => {
-    const scheduler = new Scheduler(() => 0);
-    scheduler.reconcile([{ workspace_id: 'a', label: 'A', focused: true }]);
-    scheduler.observe('a', 'main');
-    scheduler.take(0, defaults);
-    let now = 1;
-    const manual = (error: string) => retryRefresh(scheduler, async run => {
-      try { await run(['gh', 'api']); } catch { return; }
-    }, async () => { throw new Error(error); }, true, () => now);
-    let acquired!: () => Promise<void>;
-    const poll = leasedPollRefresh(scheduler, 'a', work => new Promise((resolve, reject) => {
-      acquired = async () => { try { await work(); resolve(); } catch (error) { reject(error); } };
-    }), async () => { throw new Error('local identity preflight failed'); });
-    const failed = poll.catch(error => error);
-    await manual('network connection failed');
-    now = 2;
-    await manual('HTTP 401 authentication failed');
-    expect(scheduler.nextRetryAt).toBe(0);
-    if (manualPublication) scheduler.manualSuccess('a', now);
-    now = 3;
-    await acquired();
-    expect((await failed).message).toBe('local identity preflight failed');
-    scheduler.complete(now, defaults, true);
-    expect(scheduler.take(4, defaults)).toBeUndefined();
-    expect(scheduler.take(30002, defaults)).toBeUndefined();
-    expect(scheduler.take(30003, defaults)?.workspace_id).toBe('a');
-    scheduler.complete(30003, defaults, true);
-    expect(scheduler.take(90002, defaults)).toBeUndefined();
-    expect(scheduler.take(90003, defaults)?.workspace_id).toBe('a');
-  });
-}
+test('lease acquisition owns a preflight failure after manual auth recovery', async () => {
+  const scheduler = new Scheduler(() => 0);
+  scheduler.reconcile([{ workspace_id: 'a', label: 'A', focused: true }]);
+  scheduler.observe('a', 'main');
+  scheduler.take(0, defaults);
+  let now = 1;
+  const manual = (error: string) => retryRefresh(scheduler, async run => {
+    try { await run(['gh', 'api']); } catch { return; }
+  }, async () => { throw new Error(error); }, true, () => now);
+  let acquired!: () => Promise<void>;
+  const poll = leasedPollRefresh(scheduler, 'a', work => new Promise((resolve, reject) => {
+    acquired = async () => { try { await work(); resolve(); } catch (error) { reject(error); } };
+  }), async () => { throw new Error('local identity preflight failed'); });
+  const failed = poll.catch(error => error);
+  await manual('network connection failed');
+  now = 2;
+  await manual('HTTP 401 authentication failed');
+  expect(scheduler.nextRetryAt).toBe(0);
+  now = 3;
+  await acquired();
+  expect((await failed).message).toBe('local identity preflight failed');
+  scheduler.complete(now, defaults, true);
+  expect(scheduler.take(4, defaults)).toBeUndefined();
+  expect(scheduler.take(30002, defaults)).toBeUndefined();
+  expect(scheduler.take(30003, defaults)?.workspace_id).toBe('a');
+  scheduler.complete(30003, defaults, true);
+  expect(scheduler.take(90002, defaults)).toBeUndefined();
+  expect(scheduler.take(90003, defaults)?.workspace_id).toBe('a');
+});

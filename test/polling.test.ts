@@ -255,6 +255,7 @@ if(tool==='herdr') {
   else throw Error('Unexpected Herdr '+args);
 } else if(tool==='git') {
   if(args[0]==='rev-parse') console.log(args[1]==='--absolute-git-dir'?repo+'/.git':repo);
+  else if(args[0]==='remote' && existsSync(dir+'/no-remote')) console.log('');
   else if(args[0]==='remote') console.log(args[1]==='get-url'?(existsSync(dir+'/push-url')?readFileSync(dir+'/push-url','utf8'):'https://github.com/test/repo'):'origin');
   else if(args[0]==='for-each-ref' || args[0]==='config') console.log('');
   else if(args[0]==='branch') {
@@ -282,6 +283,7 @@ if(tool==='herdr') {
       headRefName:head,headRepository:{name:'repo'},headRepositoryOwner:{login:'test'},statusCheckRollup:[]}]);
   } else if(args[0]==='api') {
     if(args.includes('number=101')) writeFileSync(dir+'/lookup-complete','');
+    if(existsSync(dir+'/stale-checkout')) writeFileSync(dir+'/branch','new');
     json({data:{repository:{pullRequest:{reviewThreads:{nodes:[],pageInfo:{hasNextPage:false}}}}}});
   }
   else throw Error('Unexpected gh '+args);
@@ -305,6 +307,56 @@ interface Publication { workspace: string; tokens: Record<string, string> }
 const publication = (number: number): Publication => ({ workspace: 'w1', tokens: {
   pr: `${defaults.icons.open} #${number}`, pr_checks: 'no checks', pr_review: 'review ?', pr_threads: '',
 } });
+
+// Run real orchestration in a child: its fake command PATH and clock never leak
+// into other tests, and no command can reach the user's Herdr or GitHub session.
+for (const outcome of ['published', 'error', 'preview', 'absence', 'stale'] as const) {
+  test(`manual refresh ${outcome} ${outcome === 'published' || outcome === 'absence' ? 'resets' : 'preserves'} workspace failure delay`, async () => {
+    const f = await checkoutFixture('lock');
+    try {
+      if (outcome === 'error') await writeFile(join(f.dir, 'gh-error'), 'HTTP 401 authentication failed');
+      if (outcome === 'absence') await f.release('no-remote');
+      if (outcome === 'stale') await f.release('stale-checkout');
+      const recovered = outcome === 'published' || outcome === 'absence';
+      const due = recovered ? 61000 : 90000;
+      const retry = recovered ? 91000 : 210000;
+      const child = Bun.spawn([process.execPath, '--eval', `
+        import { manualRefresh, session } from ${JSON.stringify(new URL('../src/polling.ts', import.meta.url).pathname)};
+        import { Scheduler } from ${JSON.stringify(new URL('../src/scheduler.ts', import.meta.url).pathname)};
+        import { defaults } from ${JSON.stringify(new URL('../src/format.ts', import.meta.url).pathname)};
+        const scheduler = new Scheduler(() => 0);
+        scheduler.reconcile([{workspace_id:'w1',label:'repo',focused:true}]);
+        scheduler.observe('w1','old');
+        scheduler.take(0,defaults); scheduler.complete(0,defaults,true);
+        scheduler.take(30000,defaults); scheduler.complete(30000,defaults,true);
+        Date.now = () => 31000;
+        const results = await manualRefresh(await session(), defaults, new Map(), ${outcome === 'preview'}, scheduler);
+        const early = scheduler.take(${due - 1},defaults)?.workspace_id ?? null;
+        const ready = scheduler.take(${due},defaults)?.workspace_id ?? null;
+        scheduler.beginAttempt('w1'); scheduler.consume('w1','old');
+        scheduler.complete(${due},defaults,true);
+        const retryEarly = scheduler.take(${retry - 1},defaults)?.workspace_id ?? null;
+        const retryReady = scheduler.take(${retry},defaults)?.workspace_id ?? null;
+        console.log(JSON.stringify({results,early,ready,retryEarly,retryReady}));
+      `], { env: f.env, stdout: 'pipe', stderr: 'pipe' });
+      const [out, err, code] = await Promise.all([
+        new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+      ]);
+      expect({ code, err }).toEqual({ code: 0, err: '' });
+      const { results, ...eligibility } = JSON.parse(out);
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe(outcome === 'absence' || outcome === 'stale' ? 'skipped' : outcome);
+      expect(results[0].stale === true).toBe(outcome === 'stale');
+      expect(eligibility).toEqual({ early: null, ready: 'w1', retryEarly: null, retryReady: 'w1' });
+      const published = await f.published();
+      if (outcome === 'published') expect(published.at(-1)).toEqual(publication(101));
+      if (outcome === 'absence') expect(published).toEqual([{ workspace: 'w1', tokens: {
+        pr: '', pr_checks: '', pr_review: '', pr_threads: '',
+      } }]);
+      if (outcome === 'preview') expect(published).toEqual([]);
+    } finally { await f.cleanup(); }
+  }, 15000);
+}
 
 test('worker retries changed checkouts without publishing obsolete metadata', async () => {
   for (const phase of ['during', 'publication'] as const) {
