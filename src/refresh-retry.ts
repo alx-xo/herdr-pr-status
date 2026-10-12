@@ -20,6 +20,7 @@ function knownRetryAt(message: string, now: number): number | undefined {
 /** Called inside the existing session refresh lease, shared by all refresh modes. */
 export async function retryRefresh<T>(scheduler: Scheduler, work: (run: Runner) => Promise<T>, run: Runner, manual = false, now: () => number = Date.now): Promise<T> {
   if (!scheduler.canRefresh(now(), manual)) {
+    scheduler.deferServiceRetry();
     throw new LookupError('service', `Refresh deferred; retry at ${new Date(scheduler.nextRetryAt).toISOString()}`);
   }
   let problem: LookupError | undefined;

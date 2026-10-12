@@ -15,6 +15,17 @@ import { localIdentity, observedCheckout, workspaceLoop } from './workspace-loop
 import { subscribe } from './subscription';
 import { sanitize } from './feedback';
 
+/** Start automatic work only once its refresh lease is owned. */
+export function leasedPollRefresh(
+  scheduler: Scheduler, workspace: string,
+  lease: (work: () => Promise<void>) => Promise<void>, work: () => Promise<void>,
+): Promise<void> {
+  return lease(async () => {
+    if (!scheduler.beginAttempt(workspace)) return;
+    await work();
+  });
+}
+
 const id = 'alx-xo.pr-status';
 const message = (error: unknown) => sanitize(error instanceof Error ? error.message : String(error));
 export async function loadConfig(): Promise<Config> {
@@ -168,7 +179,12 @@ export async function manualRefresh(s: Session, config: Config, memory?: Refresh
       await validate();
       return runCommand(args);
     });
-    return retryRefresh(scheduler, run => refresh(config, preview, run, undefined, memory, publish), guarded, true);
+    const results = await retryRefresh(scheduler, run => refresh(config, preview, run, undefined, memory, publish), guarded, true);
+    if (!preview) for (const result of results) {
+      // Normal absence also publishes a successful token clear; stale skips do not.
+      if (result.status !== 'error' && !result.stale) scheduler.manualSuccess(result.workspace, Date.now());
+    }
+    return results;
   });
 }
 export async function previewRefresh(config: Config): Promise<RefreshResult[]> {
@@ -371,7 +387,8 @@ export async function worker(s: Session): Promise<void> {
         wake = () => { clearTimeout(timeout); resolve(); };
         if (!active || signaled) { signaled = false; wake(); }
       }),
-      refresh: (config, workspace) => serialized(join(s.dir, 'refresh.lock'), async () => {
+      refresh: (config, workspace) => leasedPollRefresh(scheduler, workspace.workspace_id,
+        work => serialized(join(s.dir, 'refresh.lock'), work), async () => {
         if (!active || !await sameSession(s)) throw new Error('Poller stopped');
         if (!await enabled()) { stop(); throw new Error('Plugin disabled/unlinked'); }
         const entry = scheduler.entries.get(workspace.workspace_id);
