@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -9,6 +10,7 @@ permissions:
 
 jobs:
   check:
+    name: "Tests, types & build / ${{ matrix.os == 'ubuntu-latest' && 'Linux' || 'macOS' }}"
     strategy:
       fail-fast: false
       matrix:
@@ -25,3 +27,66 @@ jobs:
       - run: bun test
       - run: bun run typecheck
       - run: bun run build
+
+  integration:
+    name: "Herdr startup, PR badges & shutdown / ${{ matrix.os == 'ubuntu-latest' && 'Linux' || 'macOS' }}"
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - name: Provision verified Herdr 0.9.3
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -s)" in
+            Linux) os=linux ;;
+            Darwin) os=macos ;;
+            *) echo 'Unsupported runner OS' >&2; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 ;;
+            arm64|aarch64) arch=aarch64 ;;
+            *) echo 'Unsupported runner architecture' >&2; exit 1 ;;
+          esac
+          asset="herdr-${os}-${arch}"
+          # GitHub release asset SHA256 digests from:
+          # https://api.github.com/repos/herdrdev/herdr/releases/tags/v0.9.3
+          case "$asset" in
+            herdr-linux-x86_64) sha256=18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7 ;;
+            herdr-linux-aarch64) sha256=4de7aa3e25678812e92960de64f7c2aaa1bca1f0f80a3c5e559837e231e1f5c0 ;;
+            herdr-macos-x86_64) sha256=db62d548ff3e832b087a96b1894a08d26be3905f1830309cd556783f215d4054 ;;
+            herdr-macos-aarch64) sha256=5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157 ;;
+            *) echo 'No pinned checksum for runner' >&2; exit 1 ;;
+          esac
+          bin_dir="$(mktemp -d "$RUNNER_TEMP/herdr-bin.XXXXXX")"
+          curl --fail --show-error --silent --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "https://github.com/herdrdev/herdr/releases/download/v0.9.3/$asset" \
+            --output "$bin_dir/herdr"
+          (
+            cd "$bin_dir"
+            if [ "$os" = linux ]; then
+              printf '%s  herdr\n' "$sha256" | sha256sum --check --strict
+            else
+              printf '%s  herdr\n' "$sha256" | shasum -a 256 --check --strict
+            fi
+          )
+          chmod 755 "$bin_dir/herdr"
+          version="$("$bin_dir/herdr" --version)"
+          if [ "$version" != 'herdr 0.9.3' ]; then
+            echo 'Expected exactly Herdr 0.9.3' >&2
+            exit 1
+          fi
+          echo "$bin_dir" >> "$GITHUB_PATH"
+      - name: Run isolated Herdr integration suite
+        run: bun run test:integration

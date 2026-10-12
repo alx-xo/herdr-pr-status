@@ -7,7 +7,8 @@
     "dev": "bun src/main.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/main.ts --target=bun --outdir=dist"
+    "build": "bun build src/main.ts --target=bun --outdir=dist",
+    "test:integration": "tsc --noEmit -p integration/tsconfig.json && bun test ./integration/helpers.check.ts ./integration/server-output.check.ts && bun integration/run.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
