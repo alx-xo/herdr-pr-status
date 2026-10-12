@@ -80,17 +80,16 @@ version. Checksums and their upstream source are recorded in
 - [ ] Run the development checks above and wait for PR CI on macOS and Linux.
 - [ ] Smoke-test in Herdr: install/start, verify sidebar status, stop/restart, and
   follow the [update procedure](docs/installation.md#updating-or-migrating-an-installation).
-  For a beta milestone, also check multiple sessions, sleep/wake, network recovery,
-  and authentication failures. Record the tested OS/tool versions and results in
-  the release PR; distinguish automated checks from manual verification and note
-  anything not tested.
+  For changes to polling or session handling, include the relevant recovery and
+  multiple-session checks. Record tested OS/tool versions and results in the
+  release PR, distinguishing automated checks from manual verification.
 - [ ] Merge through the repository's review policy. Wait for macOS and Linux CI
   on the exact merged commit that will be released.
 - [ ] Create the matching tag and GitHub release from that verified commit SHA,
   not a moving branch tip. Include user-visible changes, known limitations, a
   comparison link to the previous release, and the update instructions.
-- [ ] For a beta, mark the GitHub release as a prerelease. Do not assume this
-  controls what Herdr installs; verify installer revision selection before
-  promising a separate beta channel.
+- [ ] Publish a normal GitHub release. Link the
+  [installation guide](docs/installation.md), which explains `main` installs and
+  selecting a release with `--ref`.
 - [ ] Confirm the published tag points to the intended commit and both version
   fields match it.
