@@ -22,7 +22,56 @@ bun run build
 bun dist/main.js info
 ```
 
-Modules separate bounded subprocess execution, read-only GitHub lookup, pure formatting, Herdr discovery/publishing, and orchestration. Tests use injected command runners rather than live GitHub/Herdr writes. The optional build produces Bun-targeted JavaScript; Herdr itself invokes `bun src/main.ts` directly.
+Modules separate bounded subprocess execution, read-only GitHub lookup, pure formatting, Herdr discovery/publishing, and orchestration. Unit tests use injected command runners rather than live GitHub/Herdr writes. The optional build produces Bun-targeted JavaScript; Herdr itself invokes `bun src/main.ts` directly.
+
+## Isolated Herdr integration check
+
+```sh
+bun run test:integration
+```
+
+Verifies automatic startup, PR badge publication, and clean shutdown in isolated
+Herdr on Linux and macOS. The suite runs separately from `bun test`.
+
+### Local setup
+
+Install **Herdr 0.9.3**, Bun, Git, and `ps`. The runtime also requires Bun FFI,
+local loopback/Unix sockets, PTYs, and `/bin/sh`. The runner validates its
+prerequisites and Herdr version before starting.
+
+### Test sequence
+
+1. Link the **current checkout** into a temporary Herdr registry and start its
+   server. The manifest startup hook launches the plugin worker.
+2. Use a disposable Git repository and fixture-backed `gh` to supply an open PR
+   with passing checks, an approval, and an unresolved review thread.
+3. Read back the four expected PR badge values through Herdr's workspace API.
+4. Wait for the stop action to succeed and report `running=false`, then verify
+   worker, server, and endpoint cleanup.
+
+Each child uses an allowlisted environment, private HOME/XDG/Git/GitHub
+configuration, a private socket, and a controlled shell. GitHub responses come
+from the fixture, which validates supported read requests. Cleanup verifies
+process ownership before sending fallback signals and removes temporary state
+once shutdown is confirmed. If cleanup fails, the runner retains private recovery
+state and reports its location with bounded, sanitized diagnostics.
+
+### Continuous integration
+
+Pull requests and pushes to `main` run four checks:
+
+| Check | Purpose |
+| --- | --- |
+| Tests, types & build / Linux | Unit tests, TypeScript checks, and build |
+| Tests, types & build / macOS | The same checks on macOS |
+| Herdr startup, PR badges & shutdown / Linux | The integration scenario above |
+| Herdr startup, PR badges & shutdown / macOS | The same scenario on macOS |
+
+Integration jobs use Bun **1.4.2**, a frozen dependency install, and Herdr
+**0.9.3**, with a 15-minute timeout per runner. Provisioning downloads the binary
+for the runner's OS/architecture, verifies its pinned SHA256, and checks its
+version. Checksums and their upstream source are recorded in
+`.github/workflows/ci.yml`.
 
 ## Release checklist
 
