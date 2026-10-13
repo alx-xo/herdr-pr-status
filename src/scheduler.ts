@@ -6,6 +6,7 @@ interface Entry {
   identity?: string;
   completed?: number;
   retryAt: number;
+  failures: number;
   version: number;
   pending: boolean;
 }
@@ -26,6 +27,10 @@ export class Scheduler {
     if (this.flight) this.flight.serviceRetry = true;
     if (knownRetryAt !== undefined) this.rateLimitUntil = Math.max(this.rateLimitUntil, knownRetryAt);
   }
+  /** Reuse an existing service deadline without recording another failure. */
+  deferServiceRetry() {
+    if (this.flight) this.flight.serviceRetry = true;
+  }
   serviceSuccess() {
     this.serviceFailures = 0;
     this.serviceRetryAt = 0;
@@ -35,7 +40,7 @@ export class Scheduler {
   focused?: string;
   focusVersion = 0;
   private checks = new Set<string>();
-  private flight?: { id: string; entry: Entry; version: number; serviceRetry?: true };
+  private flight?: { id: string; entry: Entry; version: number; superseded?: boolean; serviceRetry?: true };
   focus(id: string) {
     if (id === this.focused) return;
     this.focusVersion++;
@@ -50,7 +55,7 @@ export class Scheduler {
       const entry = this.entries.get(workspace.workspace_id);
       if (entry) entry.workspace = workspace;
       else {
-        this.entries.set(workspace.workspace_id, { workspace, retryAt: 0, version: 0, pending: true });
+        this.entries.set(workspace.workspace_id, { workspace, retryAt: 0, failures: 0, version: 0, pending: true });
         this.checks.add(workspace.workspace_id);
       }
     }
@@ -68,6 +73,8 @@ export class Scheduler {
     if (!entry) return;
     if (entry.identity !== undefined && entry.identity !== identity) {
       entry.version++;
+      entry.failures = 0;
+      entry.retryAt = 0;
       entry.pending = true;
     }
     entry.identity = identity;
@@ -85,6 +92,16 @@ export class Scheduler {
       return entry.workspace;
     }
   }
+  /** Called once on lease acquisition, before any fallible automatic preflight. */
+  beginAttempt(id: string): boolean {
+    const flight = this.flight;
+    if (!flight || flight.id !== id || this.entries.get(id) !== flight.entry) return false;
+    // Manual work may have run while this flight waited for the lease. Only its
+    // attempt markers expire here; shared cooldown and pending identity stay.
+    flight.superseded = false;
+    delete flight.serviceRetry;
+    return true;
+  }
   /** The lock/preflight may have waited: consume only the identity actually queried. */
   consume(id: string, identity: string): boolean {
     const flight = this.flight;
@@ -94,20 +111,39 @@ export class Scheduler {
     flight.entry.pending = false;
     return true;
   }
+  /** Called inside the refresh lease, only after a successful manual publication. */
+  manualSuccess(id: string, now: number) {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    entry.failures = 0;
+    entry.retryAt = 0;
+    entry.completed = now;
+    // Preserve pending local changes. A poll waiting for the lease will consume
+    // its current identity; one already finished must not overwrite this success.
+    if (this.flight?.entry === entry) {
+      this.flight.superseded = true;
+      delete this.flight.serviceRetry;
+    }
+  }
   requeue(id: string) {
     const entry = this.entries.get(id);
     if (entry) entry.pending = true;
   }
   complete(now: number, config: Config, failed: boolean) {
     const flight = this.flight; this.flight = undefined;
-    if (!flight || this.entries.get(flight.id) !== flight.entry) return;
+    if (!flight || flight.superseded || this.entries.get(flight.id) !== flight.entry) return;
     const entry = flight.entry;
     entry.completed = now;
     // A transient failure is pending retry work, not a completed periodic poll.
     // The shared service deadline (including explicit cooldown) gates eligibility.
     const serviceRetry = failed && flight.serviceRetry === true;
     entry.pending ||= serviceRetry || flight.version !== entry.version;
-    entry.retryAt = failed && !serviceRetry ? now + this.interval(flight.id, config) : 0;
+    const workspaceFailure = failed && !serviceRetry && flight.version === entry.version;
+    if (!failed) entry.failures = 0;
+    if (workspaceFailure) entry.failures++;
+    const interval = this.interval(flight.id, config);
+    const delay = Math.min(Math.max(300000, interval), interval * 2 ** Math.min(entry.failures - 1, 20));
+    entry.retryAt = workspaceFailure ? now + delay : 0;
     // Move completed work to the tail so branch churn cannot starve other workspaces.
     this.entries.delete(flight.id); this.entries.set(flight.id, entry);
   }

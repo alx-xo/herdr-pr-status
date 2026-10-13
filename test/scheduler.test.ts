@@ -51,10 +51,12 @@ test('branch switch in flight survives completion and gives background work a tu
   expect(s.take(63000, defaults)?.workspace_id).toBe('b'); s.complete(64000, defaults, false);
   expect(s.take(64000, defaults)?.workspace_id).toBe('a');
 });
-test('failure backs off despite pending changes and repeated focus', () => {
+test('old checkout failure cannot delay a new identity despite repeated focus', () => {
   const s = ready(); s.observe('a', 'feature'); s.take(3000, defaults);
   s.observe('a', 'next'); s.complete(4000, defaults, true);
   s.focus('b'); s.focus('a');
+  expect(s.take(4000, defaults)?.workspace_id).toBe('a');
+  s.complete(4000, defaults, true);
   expect(s.take(33999, defaults)).toBeUndefined();
   expect(s.take(34000, defaults)?.workspace_id).toBe('a');
 });
@@ -271,4 +273,124 @@ test('transient retries retain FIFO fairness and the capped deadline through com
     expect(s.take(deadline, config)?.workspace_id).toBe('a');
     now = deadline;
   }
+});
+
+test('repeated workspace failures double to five minutes without delaying healthy work', () => {
+  const s = new Scheduler();
+  const config = { ...defaults, pollSeconds: 3600 };
+  s.reconcile([a, b]);
+  let now = 0;
+  for (const delay of [30000, 60000, 120000, 240000, 300000, 300000]) {
+    expect(s.take(now, config)?.workspace_id).toBe('a');
+    s.complete(now, config, true);
+    if (now === 0) {
+      expect(s.take(now, config)?.workspace_id).toBe('b');
+      s.complete(now, config, false);
+    }
+    expect(s.take(now + delay - 1, config)).toBeUndefined();
+    now += delay;
+  }
+  expect(s.take(now, config)?.workspace_id).toBe('a');
+  s.complete(now, config, false);
+  expect(s.take(now + 30000, config)?.workspace_id).toBe('a');
+  s.complete(now + 30000, config, true);
+  expect(s.take(now + 60000, config)?.workspace_id).toBe('a');
+});
+
+for (const interval of [30, 600]) {
+  test(`identity resets workspace failures and ${interval}s interval remains the floor`, () => {
+    const s = new Scheduler();
+    const config = { ...defaults, activePollSeconds: interval };
+    s.reconcile([a]); s.observe('a', 'main');
+    s.take(0, config); s.complete(0, config, true);
+    s.take(interval * 1000, config); s.complete(interval * 1000, config, true);
+    s.observe('a', 'feature');
+    expect(s.take(interval * 1000 + 1, config)?.workspace_id).toBe('a');
+    s.complete(interval * 1000 + 1, config, true);
+    expect(s.take(interval * 2000, config)).toBeUndefined();
+    expect(s.take(interval * 2000 + 1, config)?.workspace_id).toBe('a');
+    s.complete(interval * 2000 + 1, config, true);
+    if (interval === 600) {
+      expect(s.take(1800000, config)).toBeUndefined();
+      expect(s.take(1800001, config)?.workspace_id).toBe('a');
+    }
+  });
+}
+
+test('manual publication resets failures without stale polling completion undoing recovery', () => {
+  const s = new Scheduler(); s.reconcile([a]); s.observe('a', 'main');
+  s.take(0, defaults); s.complete(0, defaults, true);
+  s.take(30000, defaults); s.complete(30000, defaults, true);
+  // Manual recovery is immediate, before the 90s workspace retry deadline.
+  s.manualSuccess('a', 31000);
+  expect(s.take(60999, defaults)).toBeUndefined();
+  expect(s.take(61000, defaults)?.workspace_id).toBe('a');
+  // The serialized poll has released its lease, but has not completed yet.
+  s.manualSuccess('a', 62000);
+  s.complete(62001, defaults, true);
+  expect(s.take(91999, defaults)).toBeUndefined();
+  expect(s.take(92000, defaults)?.workspace_id).toBe('a');
+});
+
+test('new polling attempts count failures after manual recovery', () => {
+  const s = new Scheduler(); s.reconcile([a]); s.observe('a', 'main');
+  s.take(92000, defaults);
+  // A queued poll consumes after manual recovery: its own failure must count.
+  s.manualSuccess('a', 92001);
+  s.beginAttempt('a'); s.consume('a', 'main'); s.complete(93000, defaults, true);
+  expect(s.take(122999, defaults)).toBeUndefined();
+  expect(s.take(123000, defaults)?.workspace_id).toBe('a');
+  s.complete(123000, defaults, true);
+  expect(s.take(182999, defaults)).toBeUndefined();
+  expect(s.take(183000, defaults)?.workspace_id).toBe('a');
+});
+
+test('focus and interval changes do not bypass an existing workspace retry deadline', () => {
+  const s = new Scheduler(); s.reconcile([a]);
+  s.take(0, defaults); s.complete(0, defaults, true);
+  s.take(30000, defaults); s.complete(30000, defaults, true);
+  s.focus('other'); s.focus('a');
+  const faster = { ...defaults, activePollSeconds: 15 };
+  expect(s.take(89999, faster)).toBeUndefined();
+  expect(s.take(90000, faster)?.workspace_id).toBe('a');
+  s.complete(90000, faster, true);
+  expect(s.take(149999, faster)).toBeUndefined();
+  expect(s.take(150000, faster)?.workspace_id).toBe('a');
+});
+
+test('queued poll does not inherit a recovered manual service failure', () => {
+  const s = new Scheduler(() => 0); s.reconcile([a]); s.observe('a', 'main');
+  s.take(0, defaults);
+  // Two manual actions acquired the lease before the queued poll.
+  s.serviceFailure(1);
+  s.serviceSuccess(); s.manualSuccess('a', 2);
+  s.beginAttempt('a'); s.consume('a', 'main'); s.complete(3, defaults, true);
+  expect(s.take(30002, defaults)).toBeUndefined();
+  expect(s.take(30003, defaults)?.workspace_id).toBe('a');
+});
+
+test('attempt start preserves shared cooldown and pending identity observations', () => {
+  const s = new Scheduler(() => 0); s.reconcile([a]); s.observe('a', 'main');
+  s.take(0, defaults);
+  s.serviceFailure(1, 120001);
+  s.observe('a', 'changed');
+  expect(s.beginAttempt('a')).toBe(true);
+  expect(s.nextRetryAt).toBe(120001);
+  expect(s.canRefresh(2, true)).toBe(false);
+  s.complete(3, defaults, true);
+  expect(s.take(120000, defaults)).toBeUndefined();
+  expect(s.take(120001, defaults)?.workspace_id).toBe('a');
+  // The unconsumed change was not turned into a workspace failure.
+  s.beginAttempt('a'); s.consume('a', 'changed'); s.complete(120002, defaults, true);
+  expect(s.take(150001, defaults)).toBeUndefined();
+  expect(s.take(150002, defaults)?.workspace_id).toBe('a');
+});
+
+test('identity consumption cannot erase an owned attempt service failure', () => {
+  const s = new Scheduler(() => 0); s.reconcile([a]); s.observe('a', 'main');
+  s.take(0, defaults); s.beginAttempt('a');
+  s.serviceFailure(1);
+  s.consume('a', 'main'); s.complete(2, defaults, true);
+  expect(s.take(15000, defaults)).toBeUndefined();
+  expect(s.take(15001, defaults)?.workspace_id).toBe('a');
 });

@@ -8,6 +8,15 @@ PR status refreshes automatically: every **30 seconds** for the active workspace
 and **60 seconds** for background workspaces by default. Configure these with
 `activePollSeconds` and `pollSeconds` (15–3600 seconds).
 
+A workspace's first non-service failure waits its configured interval; repeated
+failures double that delay up to five minutes (or the configured interval, if
+longer). Success or a branch/checkout change resets its failure history. Healthy
+workspaces keep their normal cadence. Focus/configuration changes do not shorten
+an already scheduled failure delay; subsequent failures use the current interval.
+Service/network failures and rate limits retain their shared jittered backoff.
+Manual refresh can retry immediately, but still honors known GitHub cooldowns;
+a successful publication resets that workspace's failure history.
+
 Use the Herdr plugin actions to `start`, `stop`, or manually `refresh`.
 Use `status` or `preview` for diagnostics; results appear in the action log.
 

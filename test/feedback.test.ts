@@ -2,6 +2,21 @@ import { expect, test } from 'bun:test';
 import { refresh, type RefreshState } from '../src/refresh';
 import { defaults } from '../src/format';
 import type { Runner } from '../src/process';
+import { failure } from '../src/feedback';
+
+// Rate-limit messages are sanitized stderr from real gh/local HTTP fixtures, without retry headers.
+// A permission-only 403 is the repository-failure control.
+for (const [message, category] of [
+  ['HTTP 403: API rate limit exceeded for user ID 12345. ([redacted URL])', 'service'],
+  ['HTTP 429: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. ([redacted URL])', 'service'],
+  ['GraphQL: API rate limit exceeded for user ID 12345. (repository)', 'service'],
+  ['gh: API rate limit exceeded for user ID 12345.', 'service'],
+  ['HTTP 403: Resource not accessible by integration ([redacted URL])', 'repository'],
+] as const) {
+  test(`classifies gh failure as ${category}: ${message}`, () => {
+    expect(failure(new Error(message)).category).toBe(category);
+  });
+}
 
 function fixture() {
   let branch = 'feature', repo = 'team/repo', error = '', empty = false;
