@@ -1,3 +1,4 @@
+import { version } from '../package.json';
 import { expect, test } from "bun:test";
 
 const entrypoint = new URL("../src/main.ts", import.meta.url).pathname;
@@ -49,4 +50,10 @@ test('lifecycle actions explain missing Herdr session directories', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr.toString()).toContain('HERDR_PLUGIN_STATE_DIR');
   }
+});
+
+test('version reports package version and source development identity', () => {
+  const result = Bun.spawnSync([process.execPath, entrypoint, '--version']);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString().trim()).toBe(`pr-status ${version} (source)`);
 });

@@ -14,3 +14,7 @@ docs/superpowers/
 .scratch/
 CONTEXT.md
 CONTEXT-MAP.md
+
+# Explicit per-checkout development launcher opt-in and installed runtime
+.pr-status-source
+bin/

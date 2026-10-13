@@ -5,47 +5,50 @@ min_herdr_version = "0.9.0"
 description = "GitHub PR status, CI checks, and reviews in your Herdr sidebar, updated automatically."
 platforms = ["macos", "linux"]
 
+[[build]]
+command = ["sh", "scripts/install-runtime.sh"]
+
 [[startup]]
-command = ["bun", "src/main.ts", "start"]
+command = ["sh", "scripts/run.sh", "start"]
 
 [[actions]]
 id = "info"
 title = "PR Status plugin info"
-description = "Verify the Bun plugin entrypoint"
+description = "Verify the plugin entrypoint"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "info"]
+command = ["sh", "scripts/run.sh", "info"]
 
 [[actions]]
 id = "preview"
 title = "Preview PR status"
 description = "Read GitHub status for all workspace checkouts without publishing"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "preview"]
+command = ["sh", "scripts/run.sh", "preview"]
 
 [[actions]]
 id = "refresh"
 title = "Refresh PR status"
 description = "Manually update PR tokens for all workspace checkouts"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "refresh"]
+command = ["sh", "scripts/run.sh", "refresh"]
 
 [[actions]]
 id = "start"
 title = "Start PR polling"
 description = "Ensure one detached poller for this Herdr session"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "start"]
+command = ["sh", "scripts/run.sh", "start"]
 
 [[actions]]
 id = "stop"
 title = "Stop PR polling"
 description = "Stop this session poller without changing existing tokens"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "stop"]
+command = ["sh", "scripts/run.sh", "stop"]
 
 [[actions]]
 id = "status"
 title = "PR polling status"
 description = "Show current cycle and last success or error"
 contexts = ["workspace", "tab", "pane"]
-command = ["bun", "src/main.ts", "status"]
+command = ["sh", "scripts/run.sh", "status"]

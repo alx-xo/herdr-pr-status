@@ -141,7 +141,7 @@ export async function start(s: Session): Promise<Record<string, unknown>> {
       if (Date.now() >= deadline) throw new Error('Previous poller is still stopping; retry start shortly');
       await Bun.sleep(50);
     }
-    const child = spawn(process.execPath, [Bun.main, '_worker'], {
+    const child = spawn(process.execPath, Bun.isStandaloneExecutable ? ['_worker'] : [Bun.main, '_worker'], {
       detached: true, stdio: 'ignore', env: { ...process.env, HERDR_PR_STATUS_SESSION: s.identity },
     });
     let failure: Error | undefined;
