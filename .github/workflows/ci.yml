@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -20,30 +25,50 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.sha }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
+      - name: Check requested release identity
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: sh scripts/verify-release.sh "$RELEASE_TAG"
       - run: bun test
       - run: bun run typecheck
       - run: bun run build
 
   integration:
-    name: "Herdr startup, PR badges & shutdown / ${{ matrix.os == 'ubuntu-latest' && 'Linux' || 'macOS' }}"
+    name: "Source & standalone Herdr lifecycle / ${{ matrix.target }}"
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-24.04
+            target: linux-x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos-15-intel
+            target: darwin-x64
+          - os: macos-15
+            target: darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.sha }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
+      - name: Check requested release identity
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: sh scripts/verify-release.sh "$RELEASE_TAG"
       - name: Provision verified Herdr 0.9.3
         shell: bash
         run: |
@@ -88,5 +113,31 @@ jobs:
             exit 1
           fi
           echo "$bin_dir" >> "$GITHUB_PATH"
-      - name: Run isolated Herdr integration suite
-        run: bun run test:integration
+      - name: Run isolated source lifecycle
+        run: |
+          touch .pr-status-source
+          bun run test:integration
+      - name: Build native release asset
+        run: bun run build:binary ${{ matrix.target }}
+      - name: Run isolated standalone lifecycle without Bun/Node PATH
+        run: bun run test:integration:binary --binary dist/releases/pr-status-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.target }}
+          path: dist/releases/
+          if-no-files-found: error
+
+  integration-required:
+    # Preserve existing branch-protection contexts; require every native target.
+    name: "Herdr startup, PR badges & shutdown / ${{ matrix.platform }}"
+    needs: integration
+    if: always()
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        platform: [Linux, macOS]
+    steps:
+      - name: Require successful lifecycle matrix
+        env:
+          RESULT: ${{ needs.integration.result }}
+        run: test "$RESULT" = success

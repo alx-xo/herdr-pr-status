@@ -1,0 +1,49 @@
+name: Prepare release artifacts
+
+# Deliberate, read-only preparation. Never creates a tag or publishes a release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag matching package and manifest versions
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    with:
+      release_tag: ${{ inputs.tag }}
+  assemble:
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: artifacts
+      - name: Assemble and verify complete release set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            dir="artifacts/runtime-$target"
+            test -s "$dir/SOURCE_COMMIT"
+            if test -f release/SOURCE_COMMIT; then
+              cmp release/SOURCE_COMMIT "$dir/SOURCE_COMMIT"
+            else
+              cp "$dir/SOURCE_COMMIT" release/SOURCE_COMMIT
+            fi
+            cp "$dir/pr-status-$target" release/
+            cat "$dir/pr-status-$target.sha256" >> release/SHA256SUMS
+          done
+          (cd release && sha256sum --check --strict SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release/
+          if-no-files-found: error

@@ -31,14 +31,18 @@ Read-only access to GitHub. The plugin never modifies your pull requests.
 
 ## Quick start
 
-Requires **Herdr 0.9.0+**, **Bun**, **Git**, and the **GitHub CLI (`gh`)** on macOS
-or Linux. Authenticate `gh` for the repositories you want to read before starting.
+Requires **Herdr 0.9.0+**, **Git**, and the **GitHub CLI (`gh`)** on macOS
+or glibc Linux (arm64/x64). Authenticate `gh` for the repositories you want to read.
+**Bun and Node are not required for standalone releases.**
 
-Install the plugin:
+Install a release with:
 
 ```sh
-herdr plugin install alx-xo/herdr-pr-status
+herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status
 ```
+
+Replace `<published-tag>` with a release tag. See the
+[installation guide](docs/installation.md) for requirements and updates.
 
 Then, from a terminal inside your existing Herdr session, start it:
 

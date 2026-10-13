@@ -8,7 +8,9 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/main.ts --target=bun --outdir=dist",
-    "test:integration": "tsc --noEmit -p integration/tsconfig.json && bun test ./integration/helpers.check.ts ./integration/server-output.check.ts && bun integration/run.ts"
+    "test:integration": "tsc --noEmit -p integration/tsconfig.json && bun test ./integration/helpers.check.ts ./integration/server-output.check.ts && bun integration/run.ts",
+    "build:binary": "bun scripts/build-runtime.ts",
+    "test:integration:binary": "tsc --noEmit -p integration/tsconfig.json && bun test ./integration/helpers.check.ts ./integration/server-output.check.ts && bun integration/run.ts --standalone"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

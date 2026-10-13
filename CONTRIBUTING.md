@@ -9,8 +9,12 @@ checkout, so do not move or delete it while linked.
 git clone https://github.com/alx-xo/herdr-pr-status.git
 cd herdr-pr-status
 bun install --frozen-lockfile
+touch .pr-status-source
 herdr plugin link .
 ```
+
+Create `.pr-status-source` in your linked checkout to run directly from source.
+It is ignored by Git and should not be added to managed installations.
 
 Linking does not run build hooks. In an existing Herdr session, explicitly invoke
 `herdr plugin action invoke alx-xo.pr-status.start`. Development checks:
@@ -20,18 +24,27 @@ bun run typecheck
 bun test
 bun run build
 bun dist/main.js info
+bun run build:binary
+bun run test:integration:binary
 ```
 
-Modules separate bounded subprocess execution, read-only GitHub lookup, pure formatting, Herdr discovery/publishing, and orchestration. Unit tests use injected command runners rather than live GitHub/Herdr writes. The optional build produces Bun-targeted JavaScript; Herdr itself invokes `bun src/main.ts` directly.
+Unit tests use injected command runners rather than live GitHub or Herdr writes.
+`build` produces Bun-targeted JavaScript; `build:binary` compiles a standalone
+executable for your machine into `dist/releases`. To cross-compile, pass
+`darwin-arm64`, `darwin-x64`, `linux-arm64`, or `linux-x64`.
 
 ## Isolated Herdr integration check
 
 ```sh
 bun run test:integration
+bun run test:integration:binary
 ```
 
 Verifies automatic startup, PR badge publication, and clean shutdown in isolated
 Herdr on Linux and macOS. The suite runs separately from `bun test`.
+Binary mode tests the standalone plugin without Bun or Node on its runtime PATH.
+Pass `--binary <path>` to test an existing binary. Your normal Herdr configuration
+and sessions are untouched. The test harness itself requires Bun.
 
 ### Local setup
 
@@ -58,20 +71,12 @@ state and reports its location with bounded, sanitized diagnostics.
 
 ### Continuous integration
 
-Pull requests and pushes to `main` run four checks:
+Pull requests and pushes to `main` run tests, typechecks, and builds on Linux and
+macOS. Source and standalone lifecycle checks run on macOS 15 and Ubuntu 24.04,
+each on arm64 and x64. All four targets must pass the required lifecycle checks.
+Tested binaries are uploaded as CI artifacts.
 
-| Check | Purpose |
-| --- | --- |
-| Tests, types & build / Linux | Unit tests, TypeScript checks, and build |
-| Tests, types & build / macOS | The same checks on macOS |
-| Herdr startup, PR badges & shutdown / Linux | The integration scenario above |
-| Herdr startup, PR badges & shutdown / macOS | The same scenario on macOS |
-
-Integration jobs use Bun **1.4.2**, a frozen dependency install, and Herdr
-**0.9.3**, with a 15-minute timeout per runner. Provisioning downloads the binary
-for the runner's OS/architecture, verifies its pinned SHA256, and checks its
-version. Checksums and their upstream source are recorded in
-`.github/workflows/ci.yml`.
+See [ci.yml](.github/workflows/ci.yml) for pinned tool versions and runner settings.
 
 ## Release checklist
 
@@ -85,11 +90,18 @@ version. Checksums and their upstream source are recorded in
   release PR, distinguishing automated checks from manual verification.
 - [ ] Merge through the repository's review policy. Wait for macOS and Linux CI
   on the exact merged commit that will be released.
-- [ ] Create the matching tag and GitHub release from that verified commit SHA,
+- [ ] Create the matching tag from that verified commit SHA,
   not a moving branch tip. Include user-visible changes, known limitations, a
   comparison link to the previous release, and the update instructions.
-- [ ] Publish a normal GitHub release. Link the
+- [ ] Manually dispatch **Prepare release artifacts** with that tag. It checks
+  version/tag identity, runs the native matrix, and assembles `release-assets`
+  containing four binaries, `SOURCE_COMMIT`, and verified `SHA256SUMS`.
+- [ ] Attach the contents of `release-assets` to the
+  matching GitHub release (not the CI zip), then publish it. Do not advertise
+  the tag before all assets are attached. Link the
   [installation guide](docs/installation.md), which explains `main` installs and
   selecting a release with `--ref`.
+- [ ] Replace `<published-tag>` in the README and installation guide with the
+  release tag when preparing the release.
 - [ ] Confirm the published tag points to the intended commit and both version
   fields match it.

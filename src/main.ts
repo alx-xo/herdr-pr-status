@@ -1,14 +1,20 @@
+import { version } from '../package.json';
+declare const RELEASE_COMMIT: string;
 import { sanitize } from './feedback';
 import { control, loadConfig, manualRefresh, previewRefresh, session, start, status, worker } from './polling';
 
 export async function run(args: string[]): Promise<number> {
   const command = args[0] ?? 'info';
+  if (command === '--version' && args.length === 1) {
+    console.log(`pr-status ${version} (${typeof RELEASE_COMMIT === 'string' ? RELEASE_COMMIT : 'source'})`);
+    return 0;
+  }
   if (!['info', 'preview', 'refresh', 'start', 'stop', 'status', '_worker'].includes(command) || args.length > 1) {
     console.error(`Unknown command or arguments: ${args.join(' ')}. Available commands: info, preview, refresh, start, stop, status`);
     return 1;
   }
   if (command === 'info') {
-    console.log('alx-xo.pr-status: Bun/TypeScript polling POC.');
+    console.log('alx-xo.pr-status: GitHub PR status polling.');
     console.log('start/stop/status: session poller; preview: read-only lookup; refresh: serialized manual refresh. No GitHub writes.');
     return 0;
   }

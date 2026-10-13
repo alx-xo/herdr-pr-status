@@ -1,40 +1,36 @@
 # Installation, updates, and removal
 
-Verified toolchain: Herdr **0.9.3**, Bun **1.4.2** in CI and **1.4.3** locally,
-GitHub CLI (`gh`) **2.102.0**, and Git **2.54.0**. macOS and Linux are supported;
-CI checks both. Use a **Nerd Font v3.4-compatible** terminal font for the default icons, or set `"iconSet": "unicode"` for plain Unicode symbols.
-Authenticate `gh` for the repositories you want to read before using the plugin.
+## Standalone release installs
 
-Install the GitHub source into Herdr's managed plugin directory:
+Requires **Herdr 0.9.0+**, **Git**, and authenticated **GitHub CLI (`gh`)**.
+Bun and Node are not required. Installation also needs a POSIX shell, `curl`,
+and `sha256sum` or `shasum`.
 
-```sh
-herdr plugin install alx-xo/herdr-pr-status
-```
-
-The standard install fetches the latest commit on `main`. To select a specific
-release, use its tag instead:
+Install a release with:
 
 ```sh
-herdr plugin install --ref v0.5.0 alx-xo/herdr-pr-status
+herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status
 ```
 
-Include `--ref` each time you want to select a release; a later install without
-it fetches `main` again. For an existing installation, follow the
-[update procedure](#updating-or-migrating-an-installation) before reinstalling.
+Replace `<published-tag>` with a tag from the
+[releases page](https://github.com/alx-xo/herdr-pr-status/releases).
+Always include `--ref` when installing or updating. Without it, Herdr downloads
+`main`, which may not have a matching binary.
 
-Then, from a terminal inside your existing Herdr session:
+Then, inside your existing Herdr session:
 
 ```sh
 herdr plugin action invoke alx-xo.pr-status.start
 ```
 
-Installation registers the plugin; explicit start publishes workspace tokens and
-begins polling in that session. Herdr runs the TypeScript source directly with
-Bun, not an npm package or compiled artifact. There are no runtime package
-dependencies, so users do not need `bun install` or a build step.
+Use a **Nerd Font v3.4-compatible** font, or configure `"iconSet": "unicode"`.
 
-See the official [plugin documentation bundled with Herdr 0.9.3](https://github.com/herdrdev/herdr/blob/v0.9.3/docs/versions/0.9.1/website/src/content/docs/plugins.mdx)
-for installation, build and startup behavior.
+### Platform compatibility
+
+Standalone releases target macOS and **glibc Linux**, each on arm64 and x64.
+Alpine/musl Linux and Windows are not supported. CI targets macOS 15 and
+Ubuntu 24.04. Older systems are outside the tested platform matrix.
+macOS binaries are not signed or notarized.
 
 ## Updating or migrating an installation
 
@@ -52,10 +48,10 @@ Wait for the stop action's completed log, then check the completed status log fo
 `running: false`. Action acceptance alone is not shutdown confirmation; repeat
 status and log checks if necessary. Only after all session workers have stopped:
 
-- **Managed update:** rerun `herdr plugin install alx-xo/herdr-pr-status`.
+- **Managed update:** rerun `herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status`.
   Herdr replaces the managed checkout; there is no separate update command.
 - **Local-link migration:** run `herdr plugin unlink alx-xo.pr-status`, then
-  `herdr plugin install alx-xo/herdr-pr-status`. Installing over a local link is
+  `herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status`. Installing over a local link is
   refused. Unlink leaves the local checkout files alone.
 
 Existing plugin config and state remain in place. Do not overwrite your active

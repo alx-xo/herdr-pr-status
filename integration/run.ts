@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, readFile, rm, readdir } from 'node:fs/promises';
+import { version as pluginVersion } from '../package.json';
+import { mkdtemp, mkdir, writeFile, symlink, readFile, rm, readdir, realpath, copyFile, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,15 +9,21 @@ import { isolatedEnv, inspectUnlessGone, waitFor as condition } from './helpers'
 import { joinCommand, runIsolatedCommand } from './command';
 import { captureServerOutput } from './server-output';
 
-const checkout = resolve(import.meta.dir, '..');
+const source = resolve(import.meta.dir, '..');
+const standalone = process.argv.includes('--standalone');
+const binaryArg = process.argv.indexOf('--binary');
+const suppliedBinary = binaryArg < 0 ? undefined : process.argv[binaryArg + 1];
+assert(binaryArg < 0 || (standalone && suppliedBinary), '--binary requires --standalone and a path');
 const plugin = 'alx-xo.pr-status';
 const binaries = Object.fromEntries(['herdr', 'bun', 'git', 'ps'].map(name => {
   const path = Bun.which(name);
   assert(path, `Required tool missing: ${name}; install it explicitly (no downloads are performed)`);
   return [name, path];
 }));
-const root = await mkdtemp(join(tmpdir(), 'herdr-it-'));
+const root = await realpath(await mkdtemp(join(tmpdir(), 'herdr-it-')));
+const checkout = standalone ? join(root, 'plugin') : source;
 const env = isolatedEnv(root);
+if (standalone) env.PATH = join(root, 'bin');
 const state = join(root, 'state/herdr/plugins', plugin);
 let server: ReturnType<typeof Bun.spawn> | undefined;
 let serverOutput: ReturnType<typeof captureServerOutput> | undefined;
@@ -71,7 +78,7 @@ async function action(name: 'status' | 'stop'): Promise<any> {
 // ps output is private/in-memory and is NEVER included in diagnostics.
 async function ownedWorkers(): Promise<number[]> {
   const rows = (await run([binaries.ps!, '-axo', 'pid=,command='])).split('\n');
-  const candidates = rows.filter(row => row.includes(`${checkout}/src/main.ts _worker`))
+  const candidates = rows.filter(row => row.includes(standalone ? `${checkout}/bin/pr-status _worker` : `${checkout}/src/main.ts _worker`))
     .map(row => Number(row.trim().split(/\s+/)[0]));
   const pids: number[] = [];
   for (const pid of candidates) {
@@ -128,9 +135,33 @@ try {
     await mkdir(join(root, dir), { recursive: true, mode: 0o700 });
   }
   await writeFile(join(root, 'gitconfig'), '');
-  for (const name of ['herdr', 'bun', 'git']) await symlink(binaries[name]!, join(root, 'bin', name));
+  for (const name of (standalone ? ['herdr', 'git'] : ['herdr', 'bun', 'git'])) await symlink(binaries[name]!, join(root, 'bin', name));
+  if (standalone) {
+    for (const name of ['sh', 'dirname']) {
+      const path = Bun.which(name);
+      assert(path, `Required tool missing: ${name}`);
+      await symlink(path, join(root, 'bin', name));
+    }
+    await mkdir(join(checkout, 'bin'), { recursive: true });
+    const manifest = await readFile(join(source, 'herdr-plugin.toml'), 'utf8');
+    await writeFile(join(checkout, 'herdr-plugin.toml'), manifest);
+    await mkdir(join(checkout, 'scripts'));
+    await copyFile(join(source, 'scripts/run.sh'), join(checkout, 'scripts/run.sh'));
+    const target = `${process.platform}-${process.arch}`;
+    if (suppliedBinary) {
+      await copyFile(resolve(suppliedBinary), join(checkout, 'bin/pr-status'));
+    } else {
+      await run([binaries.bun!, join(source, 'scripts/build-runtime.ts'), target, join(checkout, 'bin')], source);
+      await rename(join(checkout, 'bin', `pr-status-${target}`), join(checkout, 'bin/pr-status'));
+    }
+    const revision = await run(['git', 'rev-parse', 'HEAD'], source);
+    assert.equal(await run([join(checkout, 'bin/pr-status'), '--version']), `pr-status ${pluginVersion} (${revision})`);
+    await run([binaries.bun!, 'build', '--compile', join(source, 'integration/fake-gh.ts'), '--outfile', join(root, 'bin/gh')]);
+    assert.equal(Bun.which('bun', { PATH: env.PATH }), null, 'No Bun in runtime PATH');
+    assert.equal(Bun.which('node', { PATH: env.PATH }), null, 'No Node in runtime PATH');
+  }
   const quote = (s: string) => `'${s.replaceAll("'", "'\"'\"'")}'`;
-  await writeFile(join(root, 'bin/gh'), `#!/bin/sh\nexec ${quote(binaries.bun!)} ${quote(join(import.meta.dir, 'fake-gh.ts'))} "$@"\n`, { mode: 0o700 });
+  if (!standalone) await writeFile(join(root, 'bin/gh'), `#!/bin/sh\nexec ${quote(binaries.bun!)} ${quote(join(import.meta.dir, 'fake-gh.ts'))} "$@"\n`, { mode: 0o700 });
   const version = await run([binaries.herdr!, '--version']);
   assert.match(version, /^herdr 0\.9\.3(?:\s|$)/, `Required Herdr 0.9.3, found ${version}`);
   await run([binaries.bun!, '--version']);
@@ -186,7 +217,7 @@ try {
     const paths = ['api.sock', 'api-client.sock', 'api.sock.agent'];
     return paths.every(path => !existsSync(join(root, path))) ? true : undefined;
   });
-  console.log('PASS Herdr 0.9.3: checkout linked → startup worker → four exact PR tokens → completed stop → worker/server cleanup');
+  console.log(`${standalone ? 'Standalone (no Bun/Node PATH)' : 'Source'} PASS Herdr 0.9.3: checkout linked → startup worker → four exact PR tokens → completed stop → worker/server cleanup`);
 } catch (error) {
   failure = error;
   // Bounded diagnostics, never control.json (contains a bearer token) or env/ps.
