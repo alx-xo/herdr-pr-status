@@ -38,10 +38,10 @@ or glibc Linux (arm64/x64). Authenticate `gh` for the repositories you want to r
 Install a release with:
 
 ```sh
-herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status
+herdr plugin install --ref v1.0.0 alx-xo/herdr-pr-status
 ```
 
-Replace `<published-tag>` with a release tag. See the
+See the
 [installation guide](docs/installation.md) for requirements and updates.
 
 Then, from a terminal inside your existing Herdr session, start it:
