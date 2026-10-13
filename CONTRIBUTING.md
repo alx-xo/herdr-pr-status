@@ -99,9 +99,8 @@ See [ci.yml](.github/workflows/ci.yml) for pinned tool versions and runner setti
 - [ ] Attach the contents of `release-assets` to the
   matching GitHub release (not the CI zip), then publish it. Do not advertise
   the tag before all assets are attached. Link the
-  [installation guide](docs/installation.md), which explains `main` installs and
-  selecting a release with `--ref`.
-- [ ] Replace `<published-tag>` in the README and installation guide with the
-  release tag when preparing the release.
+  [installation guide](docs/installation.md). Verify the default install command
+  downloads and runs the published binary in an isolated installation.
+- [ ] Update the optional version-pinned example in the installation guide.
 - [ ] Confirm the published tag points to the intended commit and both version
   fields match it.

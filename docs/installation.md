@@ -6,16 +6,20 @@ Requires **Herdr 0.9.0+**, **Git**, and authenticated **GitHub CLI (`gh`)**.
 Bun and Node are not required. Installation also needs a POSIX shell, `curl`,
 and `sha256sum` or `shasum`.
 
-Install a release with:
+Install with:
 
 ```sh
-herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status
+herdr plugin install alx-xo/herdr-pr-status
 ```
 
-Replace `<published-tag>` with a tag from the
+To choose a specific version, add `--ref`:
+
+```sh
+herdr plugin install --ref v1.0.0 alx-xo/herdr-pr-status
+```
+
+Find available versions on the
 [releases page](https://github.com/alx-xo/herdr-pr-status/releases).
-Always include `--ref` when installing or updating. Without it, Herdr downloads
-`main`, which may not have a matching binary.
 
 Then, inside your existing Herdr session:
 
@@ -48,10 +52,10 @@ Wait for the stop action's completed log, then check the completed status log fo
 `running: false`. Action acceptance alone is not shutdown confirmation; repeat
 status and log checks if necessary. Only after all session workers have stopped:
 
-- **Managed update:** rerun `herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status`.
+- **Managed update:** rerun `herdr plugin install alx-xo/herdr-pr-status`.
   Herdr replaces the managed checkout; there is no separate update command.
 - **Local-link migration:** run `herdr plugin unlink alx-xo.pr-status`, then
-  `herdr plugin install --ref <published-tag> alx-xo/herdr-pr-status`. Installing over a local link is
+  `herdr plugin install alx-xo/herdr-pr-status`. Installing over a local link is
   refused. Unlink leaves the local checkout files alone.
 
 Existing plugin config and state remain in place. Do not overwrite your active
