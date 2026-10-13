@@ -5,8 +5,6 @@ cd "$(dirname "$0")/.."
 fail() { echo "PR Status: $*" >&2; exit 1; }
 version=$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' herdr-plugin.toml)
 [ -n "$version" ] || fail 'Cannot determine release version.'
-revision=$(git rev-parse HEAD) || fail 'A Git checkout is required to verify release identity.'
-git diff --quiet HEAD -- || fail 'Modified checkout: use the explicit source development opt-in instead.'
 case "$(uname -s)" in
   Darwin) os=darwin ;;
   Linux) os=linux ;;
@@ -30,7 +28,9 @@ download() {
     "$base/$1" --output "$tmp/$1" || fail "Download failed for v$version/$1. No matching published binary may exist; install an available exact release or use source development."
 }
 download SOURCE_COMMIT
-[ "$(cat "$tmp/SOURCE_COMMIT")" = "$revision" ] || fail 'Unreleased checkout: release source commit does not match HEAD. No older binary or source-build fallback is allowed.'
+revision=$(cat "$tmp/SOURCE_COMMIT")
+[ "${#revision}" -eq 40 ] || fail 'Invalid release source commit.'
+case "$revision" in *[!0-9a-f]*) fail 'Invalid release source commit.' ;; esac
 download SHA256SUMS
 download "$asset"
 expected=$(awk -v name="$asset" '$2 == name { print $1 }' "$tmp/SHA256SUMS")

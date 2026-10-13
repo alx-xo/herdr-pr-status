@@ -25,7 +25,7 @@ async function fixture(os = 'Darwin', arch = 'arm64') {
   await writeFile(join(root, 'release/SHA256SUMS'), `${"0".repeat(64)}  unrelated-asset\n${checksum}  ${asset}\n`);
   return { root, revision, asset, command, install: () => command(['sh', 'scripts/install-runtime.sh']) };
 }
-test('installer selects a pinned verified native release matching this checkout', async () => {
+test('installer selects the verified release declared by the manifest', async () => {
   const f = await fixture();
   const result = f.install();
   expect(result.exitCode).toBe(0);
@@ -33,12 +33,20 @@ test('installer selects a pinned verified native release matching this checkout'
   expect(await readFile(join(f.root, 'urls'), 'utf8')).toContain('https://github.com/alx-xo/herdr-pr-status/releases/download/v0.5.0/pr-status-darwin-arm64');
 });
 
-test('installer refuses a release built from a different source revision', async () => {
+test('installer accepts the declared release after the checkout advances', async () => {
   const f = await fixture();
-  await writeFile(join(f.root, 'release/SOURCE_COMMIT'), '0000000000000000000000000000000000000000\n');
+  expect(f.command(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'later development']).exitCode).toBe(0);
+  expect(f.command(['git', 'rev-parse', 'HEAD']).stdout.toString().trim()).not.toBe(f.revision);
+  const result = f.install();
+  expect(result.exitCode).toBe(0);
+  expect(f.command(['./bin/pr-status', '--version']).stdout.toString().trim()).toBe(`pr-status 0.5.0 (${f.revision})`);
+});
+test.each(['', 'not-a-commit'])('installer rejects malformed release provenance %j', async revision => {
+  const f = await fixture();
+  await writeFile(join(f.root, 'release/SOURCE_COMMIT'), `${revision}\n`);
   const result = f.install();
   expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain('Unreleased checkout');
+  expect(result.stderr.toString()).toContain('Invalid release source commit');
   expect(await Bun.file(join(f.root, 'bin/pr-status')).exists()).toBe(false);
 });
 test('installer refuses corrupted bytes and leaves an existing runtime intact', async () => {
